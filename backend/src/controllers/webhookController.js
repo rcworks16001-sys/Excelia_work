@@ -28,6 +28,11 @@ cloudinary.config({
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const NLU_MODEL = 'claude-haiku-4-5-20251001';
 
+// WhatsApp Cloud (Graph) API version — the ONE place it's set. Meta sunset
+// v18.0 on 2026-01-26; every outbound send call (text now, image/location in
+// Steps 4/5) must import this constant rather than hardcoding a version.
+const GRAPH_API_VERSION = 'v22.0';
+
 // ── Verify webhook ──
 const verify = (req, res) => {
     const mode = req.query['hub.mode'];
@@ -47,7 +52,7 @@ const verify = (req, res) => {
 const sendWhatsAppMessage = async (to, message) => {
     try {
         await axios.post(
-            `https://graph.facebook.com/v18.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+            `https://graph.facebook.com/${GRAPH_API_VERSION}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
             {
                 messaging_product: 'whatsapp',
                 to: to,
