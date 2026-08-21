@@ -12,12 +12,16 @@ const formatXOF = (amount) => {
     return `${Math.abs(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} F CFA`;
 };
 
-function PropertyCard({ property, onPhotosChanged, t }) {
+function PropertyCard({ property, onPhotosChanged, t, lang }) {
     const fileInputRef = useRef(null);
     const [uploading, setUploading] = useState(false);
     const [uploadError, setUploadError] = useState('');
     const photos = property.photos || [];
     const hasPhoto = photos.length > 0;
+    // description is authored in French; description_en is the cached one-time
+    // translation. Falls back to French if this listing hasn't been translated
+    // yet (run `npm run backfill-translations` in backend/ to fill new ones).
+    const description = lang === 'en' ? (property.description_en || property.description) : property.description;
 
     const handleFileChange = async (e) => {
         const file = e.target.files?.[0];
@@ -74,9 +78,9 @@ function PropertyCard({ property, onPhotosChanged, t }) {
                     {property.bedrooms ? ` · ${property.bedrooms} ${t.bedroomsAbbrev}` : ''}
                 </div>
                 <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>{formatXOF(property.price)}</div>
-                {property.description && (
+                {description && (
                     <p style={{ fontSize: 12, color: 'var(--ash)', lineHeight: 1.5, marginBottom: 8 }}>
-                        {property.description}
+                        {description}
                     </p>
                 )}
 
@@ -183,7 +187,8 @@ export default function PropertiesPage() {
         const q = search.toLowerCase();
         return (p.neighbourhood || '').toLowerCase().includes(q)
             || (p.city || '').toLowerCase().includes(q)
-            || (p.description || '').toLowerCase().includes(q);
+            || (p.description || '').toLowerCase().includes(q)
+            || (p.description_en || '').toLowerCase().includes(q);
     });
 
     return (
@@ -225,7 +230,7 @@ export default function PropertiesPage() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 16 }}>
                 {loading && [1, 2, 3, 4, 5, 6].map((i) => <SkeletonCard key={i} />)}
                 {!loading && filtered.map((property) => (
-                    <PropertyCard key={property.id} property={property} onPhotosChanged={handlePhotosChanged} t={t} />
+                    <PropertyCard key={property.id} property={property} onPhotosChanged={handlePhotosChanged} t={t} lang={lang} />
                 ))}
             </div>
 

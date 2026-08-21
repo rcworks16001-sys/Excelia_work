@@ -256,21 +256,28 @@ const extractViewingSelection = async (text, listingCount) => {
 const AppointmentDateTimeSchema = z.object({
     decision: z.enum(['datetime_given', 'decline']),
     iso_datetime: z.string().nullable(),
+    resolved_date: z.string().nullable(),
+    time_of_day: z.enum(['morning', 'afternoon', 'evening']).nullable(),
 });
 
-const extractAppointmentDateTime = async (text) => {
-    const fallback = { decision: 'datetime_given', iso_datetime: null };
+// `now` is injectable so the backfill script can re-resolve an OLD booking
+// using the date it was actually made — "demain" means nothing without the
+// reference point it was said relative to.
+const extractAppointmentDateTime = async (text, referenceNow = null) => {
+    const fallback = { decision: 'datetime_given', iso_datetime: null, resolved_date: null, time_of_day: null };
     if (!text || !text.trim()) return fallback;
 
     try {
-        const now = new Date().toISOString();
+        const now = (referenceNow ? new Date(referenceNow) : new Date()).toISOString();
         const response = await anthropic.messages.parse({
             model: NLU_MODEL,
             max_tokens: 200,
             temperature: 0,
             system: `The current date/time is ${now} (UTC). The user was just asked for their preferred date and time for a property viewing in Togo, and is replying in French or English, possibly with a relative expression ("demain", "next Friday at 3pm", "vendredi prochain").
 - decision: "decline" only if they are now saying they've changed their mind and no longer want to book. Otherwise "datetime_given".
-- iso_datetime: resolve their reply to an absolute ISO 8601 datetime (assume Togo's timezone, UTC+0) ONLY if you can confidently determine both a date and a time. If the date or time is too vague to resolve confidently (e.g. only a day of week with no time), return null rather than guessing — the raw text is kept regardless.`,
+- iso_datetime: resolve their reply to an absolute ISO 8601 datetime (assume Togo's timezone, UTC+0) ONLY if you can confidently determine both a date AND a specific clock time. If the time is vague ("matin", "morning", "dans la journée"), return null here — use resolved_date + time_of_day instead. Never invent a clock time.
+- resolved_date: the calendar date they mean, as "YYYY-MM-DD" (Togo time, UTC+0), whenever the DATE is determinable — including relative expressions ("demain" -> the day after the current date above, "vendredi" -> the next upcoming Friday). Fill this in even when you also filled iso_datetime, and even when the time of day is unknown. null only if no date can be determined at all.
+- time_of_day: "morning", "afternoon", or "evening" if they indicated a coarse part of the day ("matin", "après-midi", "le soir"). If they gave a specific clock time instead, still classify it (e.g. 15h -> "afternoon"). null if there is no time indication whatsoever.`,
             messages: [{ role: 'user', content: text }],
             output_config: { format: zodOutputFormat(AppointmentDateTimeSchema) },
         });
@@ -292,7 +299,11 @@ const formatListingsSummary = (listings, lang) => {
         const typeLabel = PROPERTY_TYPE_LABELS[p.type]?.[lang] ?? p.type;
         const bedroomsLabel = lang === 'fr' ? 'chambre(s)' : 'bedroom(s)';
         const bedroomsPart = p.bedrooms ? ` · ${p.bedrooms} ${bedroomsLabel}` : '';
-        const descriptionPart = p.description ? `\n${p.description}` : '';
+        // Descriptions are authored in French; description_en is the cached
+        // one-time translation. Falls back to French if a listing hasn't been
+        // translated yet, so an English lead still gets the details.
+        const description = lang === 'en' ? (p.description_en || p.description) : p.description;
+        const descriptionPart = description ? `\n${description}` : '';
         return `${i + 1}. ${typeLabel} — ${p.neighbourhood}, ${p.city}${bedroomsPart} — ${formatXOF(p.price)}${descriptionPart}\nContact: ${p.agency_contact}`;
     });
     return `${BOT_STRINGS.results_intro[lang]}\n\n${lines.join('\n\n')}`;
@@ -342,6 +353,8 @@ const handleViewingDateTimeReply = async ({ leadId, propertyId, text, lang }) =>
         propertyId,
         requestedText: text,
         requestedDatetime: result.iso_datetime,
+        requestedDate: result.resolved_date,
+        requestedTimeOfDay: result.time_of_day,
     });
     await clearPendingAction(leadId);
 

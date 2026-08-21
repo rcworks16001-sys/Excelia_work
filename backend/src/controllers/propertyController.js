@@ -4,7 +4,7 @@ const cloudinary = require('../utils/cloudinary');
 // Columns the bot and dashboard actually need — never SELECT *.
 const PROPERTY_COLUMNS = `
     id, city, neighbourhood, type, price, bedrooms,
-    description, photos, latitude, longitude, agency_contact
+    description, description_en, photos, latitude, longitude, agency_contact
 `;
 
 const PRICE_TOLERANCE = 1.1; // 10% tolerance on price_max, per CLAUDE.md search rules

@@ -3,6 +3,37 @@
 // (backend/src/utils/language.js), just for the admin dashboard's own
 // interface rather than the bot's WhatsApp replies.
 
+// Bilingual labels for the property `type` enum. Top-level because THREE
+// pages need them (properties, appointments, lead detail) — the appointment
+// views were previously rendering the raw DB enum ("appartement") because
+// this map was only reachable via dashboardStrings[lang].properties.
+// Mirrors PROPERTY_TYPE_LABELS in backend/src/utils/language.js.
+export const propertyTypeLabels = {
+    fr: {
+        chambre_salon: 'Chambre salon',
+        appartement: 'Appartement',
+        villa: 'Villa',
+        terrain: 'Terrain',
+        mini_villa: 'Mini-villa',
+        appartement_meuble: 'Appartement meublé',
+    },
+    en: {
+        chambre_salon: 'Single room',
+        appartement: 'Apartment',
+        villa: 'Villa',
+        terrain: 'Land',
+        mini_villa: 'Mini-villa',
+        appartement_meuble: 'Furnished apartment',
+    },
+};
+
+// Coarse part-of-day, shown when a lead gave a day but no exact clock time
+// ("demain matin" -> "22 août 2026, matin").
+export const timeOfDayLabels = {
+    fr: { morning: 'matin', afternoon: 'après-midi', evening: 'soir' },
+    en: { morning: 'morning', afternoon: 'afternoon', evening: 'evening' },
+};
+
 export const dashboardStrings = {
     fr: {
         layout: {
@@ -67,14 +98,7 @@ export const dashboardStrings = {
             emptyFilter: 'Aucun bien pour ce filtre',
             loadError: 'Échec du chargement des biens.',
             bedroomsAbbrev: 'ch.',
-            typeLabels: {
-                chambre_salon: 'Chambre salon',
-                appartement: 'Appartement',
-                villa: 'Villa',
-                terrain: 'Terrain',
-                mini_villa: 'Mini-villa',
-                appartement_meuble: 'Appartement meublé',
-            },
+            typeLabels: propertyTypeLabels.fr, // same object — one copy, three consumers
         },
         appointments: {
             heading: 'Rendez-vous',
@@ -168,14 +192,7 @@ export const dashboardStrings = {
             emptyFilter: 'No properties for this filter',
             loadError: 'Failed to load properties.',
             bedroomsAbbrev: 'bd.',
-            typeLabels: {
-                chambre_salon: 'Single room',
-                appartement: 'Apartment',
-                villa: 'Villa',
-                terrain: 'Land',
-                mini_villa: 'Mini-villa',
-                appartement_meuble: 'Furnished apartment',
-            },
+            typeLabels: propertyTypeLabels.en, // same object — one copy, three consumers
         },
         appointments: {
             heading: 'Appointments',

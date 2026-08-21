@@ -33,6 +33,14 @@ const runMigrations = async () => {
             );
         `);
 
+        // English rendering of `description` (which is authored in French).
+        // Filled ONCE per listing by scripts/backfill-translations.js and then
+        // read for free forever — never translated per page-view or per bot
+        // reply. Nullable on purpose: readers fall back to the French
+        // description, so a brand-new listing degrades gracefully until the
+        // next backfill run fills it in.
+        await pool.query(`ALTER TABLE properties ADD COLUMN IF NOT EXISTS description_en TEXT;`);
+
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_properties_city ON properties (city);`);
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_properties_neighbourhood ON properties (neighbourhood);`);
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_properties_type ON properties (type);`);
@@ -102,6 +110,16 @@ const runMigrations = async () => {
         `);
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_appointments_lead_id ON appointments (lead_id);`);
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_appointments_property_id ON appointments (property_id);`);
+
+        // requested_datetime only gets set when BOTH date and time were
+        // confidently resolvable, which threw away perfectly good dates from
+        // replies like "demain matin" (date resolvable, time only coarse).
+        // These two capture that middle ground WITHOUT inventing a clock time:
+        // requested_date is the resolved calendar day, requested_time_of_day
+        // the coarse part-of-day. requested_datetime keeps its strict
+        // exact-datetime-only meaning so nothing downstream is misled.
+        await pool.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS requested_date DATE;`);
+        await pool.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS requested_time_of_day TEXT CHECK (requested_time_of_day IN ('morning', 'afternoon', 'evening'));`);
 
         // Prospect pipeline stage. Defaults every lead (including existing
         // rows) to 'new'.

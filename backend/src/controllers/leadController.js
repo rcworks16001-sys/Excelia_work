@@ -140,7 +140,10 @@ const getLeadWithConversation = async (id) => {
     );
 
     const appointments = await pool.query(
-        `SELECT a.id, a.requested_datetime_text, a.requested_datetime, a.status, a.created_at,
+        `SELECT a.id, a.requested_datetime_text, a.requested_datetime,
+                -- as text, not DATE — see the note in appointmentController.js
+                to_char(a.requested_date, 'YYYY-MM-DD') AS requested_date,
+                a.requested_time_of_day, a.status, a.created_at,
                 p.id AS property_id, p.type, p.neighbourhood, p.city, p.price
          FROM appointments a JOIN properties p ON p.id = a.property_id
          WHERE a.lead_id = $1 ORDER BY a.created_at DESC`,

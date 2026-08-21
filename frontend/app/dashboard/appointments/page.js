@@ -6,15 +6,48 @@ import Link from 'next/link';
 import api from '../../../lib/api';
 import { APPOINTMENT_STATUS_CONFIG } from '../../../lib/statusConfig';
 import { useDashboardLanguage } from '../../../lib/useDashboardLanguage';
-import { dashboardStrings } from '../../../lib/dashboardStrings';
+import { dashboardStrings, propertyTypeLabels, timeOfDayLabels } from '../../../lib/dashboardStrings';
 
 // Locale follows the dashboard toggle, so date/time text stays consistent
 // with everything else on the page instead of always rendering English-style.
+//
+// timeZone is pinned to UTC because Togo is UTC+0 and these are viewings that
+// physically happen there — without this, toLocaleString silently renders in
+// whatever zone the ADMIN's browser is in, so a 15:00 Lomé viewing showed as
+// 20:30 to someone in India. Appointment times must not move with the viewer.
 const formatDate = (date, lang) => {
     if (!date) return '—';
     return new Date(date).toLocaleString(lang === 'fr' ? 'fr-FR' : 'en-GB', {
-        day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+        day: '2-digit', month: 'short', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', timeZone: 'UTC',
     });
+};
+
+// Date only — used when a lead gave a day but no exact clock time.
+// Arrives as a bare "YYYY-MM-DD" string (the API deliberately sends text, not
+// a timestamp). Pinning it to UTC midnight is what stops "2026-08-21" from
+// being read as local midnight and then rendering as the 20th.
+const formatDateOnly = (dateStr, lang) => {
+    if (!dateStr) return '';
+    return new Date(`${dateStr}T00:00:00Z`).toLocaleDateString(lang === 'fr' ? 'fr-FR' : 'en-GB', {
+        day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC',
+    });
+};
+
+// What the lead asked for, best-precision-first:
+//   exact datetime  -> "22 Aug 2026, 15:00"
+//   date + day part -> "22 Aug 2026, morning"
+//   date only       -> "22 Aug 2026"
+//   nothing parsed  -> their raw words ("demain matin")
+// The raw text is always the last resort so a booking never displays blank.
+const formatRequested = (appt, lang) => {
+    if (appt.requested_datetime) return formatDate(appt.requested_datetime, lang);
+    if (appt.requested_date) {
+        const day = formatDateOnly(appt.requested_date, lang);
+        const part = timeOfDayLabels[lang][appt.requested_time_of_day];
+        return part ? `${day}, ${part}` : day;
+    }
+    return appt.requested_datetime_text;
 };
 
 const formatXOF = (amount) => {
@@ -130,21 +163,12 @@ export default function AppointmentsPage() {
                         </div>
                         <div>
                             <div style={{ fontSize: 12, fontWeight: 600 }}>
-                                {appt.type} — {appt.neighbourhood}, {appt.city}
+                                {propertyTypeLabels[lang][appt.type] || appt.type} — {appt.neighbourhood}, {appt.city}
                             </div>
                             <div style={{ fontSize: 11, color: 'var(--fog)' }}>{formatXOF(appt.price)}</div>
                         </div>
                         <div>
-                            {lang === 'en' && appt.requested_datetime ? (
-                                <div style={{ fontSize: 12 }}>{formatDate(appt.requested_datetime, lang)}</div>
-                            ) : (
-                                <>
-                                    <div style={{ fontSize: 12 }}>{appt.requested_datetime_text}</div>
-                                    {appt.requested_datetime && (
-                                        <div style={{ fontSize: 11, color: 'var(--fog)' }}>{formatDate(appt.requested_datetime, lang)}</div>
-                                    )}
-                                </>
-                            )}
+                            <div style={{ fontSize: 12 }}>{formatRequested(appt, lang)}</div>
                         </div>
                         <span className="badge" style={{
                             background: APPOINTMENT_STATUS_CONFIG[appt.status]?.bg || 'var(--mist)',
