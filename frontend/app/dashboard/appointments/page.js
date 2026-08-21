@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import api from '../../../lib/api';
+import { APPOINTMENT_STATUS_CONFIG } from '../../../lib/statusConfig';
 import { useDashboardLanguage } from '../../../lib/useDashboardLanguage';
 import { dashboardStrings } from '../../../lib/dashboardStrings';
 
@@ -18,13 +19,6 @@ const formatXOF = (amount) => {
     const n = Math.round(Number(amount));
     if (!Number.isFinite(n)) return '';
     return `${Math.abs(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} F CFA`;
-};
-
-const STATUS_COLORS = {
-    pending: { bg: 'var(--yellow)', color: 'var(--ink)' },
-    confirmed: { bg: 'var(--green)', color: 'var(--ink)' },
-    cancelled: { bg: 'var(--mist)', color: 'var(--fog)' },
-    completed: { bg: 'var(--ink)', color: '#fff' },
 };
 
 function SkeletonRow() {
@@ -45,6 +39,7 @@ export default function AppointmentsPage() {
     const [appointments, setAppointments] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [search, setSearch] = useState('');
     const [lang] = useDashboardLanguage();
     const t = dashboardStrings[lang].appointments;
 
@@ -66,12 +61,32 @@ export default function AppointmentsPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    const filteredAppointments = appointments.filter((appt) => {
+        if (!search) return true;
+        const q = search.toLowerCase();
+        return (appt.lead_name || '').toLowerCase().includes(q)
+            || (appt.lead_phone || '').toLowerCase().includes(q)
+            || (appt.neighbourhood || '').toLowerCase().includes(q)
+            || (appt.city || '').toLowerCase().includes(q);
+    });
+
     return (
         <div>
             <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: -0.5, marginBottom: 4 }}>{t.heading}</h1>
             <p style={{ fontSize: 13, color: 'var(--fog)', marginBottom: 24 }}>
                 {t.subtitle}
             </p>
+
+            <input
+                type="text"
+                placeholder={t.searchPlaceholder}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={{
+                    padding: '9px 14px', border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)',
+                    fontSize: 13, outline: 'none', width: 260, marginBottom: 16, color: 'var(--ink)',
+                }}
+            />
 
             {error && <div style={{ color: '#b91c1c', fontSize: 13, marginBottom: 16 }}>{error}</div>}
 
@@ -89,21 +104,21 @@ export default function AppointmentsPage() {
 
                 {loading && [1, 2, 3].map((i) => <SkeletonRow key={i} />)}
 
-                {!loading && appointments.length === 0 && (
+                {!loading && filteredAppointments.length === 0 && (
                     <div style={{ padding: '56px 20px', textAlign: 'center' }}>
                         <div style={{ fontSize: 32, marginBottom: 10 }}>📅</div>
                         <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>{t.emptyTitle}</div>
                         <p style={{ fontSize: 13, color: 'var(--fog)' }}>
-                            {t.emptyHint}
+                            {search ? t.emptyFilterHint : t.emptyHint}
                         </p>
                     </div>
                 )}
 
-                {!loading && appointments.map((appt, i) => (
+                {!loading && filteredAppointments.map((appt, i) => (
                     <div key={appt.id} style={{
                         display: 'grid', gridTemplateColumns: '1.6fr 1.8fr 1.6fr 1fr 1.2fr',
                         padding: '15px 20px', alignItems: 'center',
-                        borderBottom: i < appointments.length - 1 ? '1px solid var(--ice)' : 'none',
+                        borderBottom: i < filteredAppointments.length - 1 ? '1px solid var(--ice)' : 'none',
                     }}>
                         <div>
                             <Link href={`/dashboard/leads/${appt.lead_id}`} style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)', textDecoration: 'none' }}>
@@ -124,11 +139,11 @@ export default function AppointmentsPage() {
                             )}
                         </div>
                         <span className="badge" style={{
-                            background: STATUS_COLORS[appt.status]?.bg || 'var(--mist)',
-                            color: STATUS_COLORS[appt.status]?.color || 'var(--ash)',
+                            background: APPOINTMENT_STATUS_CONFIG[appt.status]?.bg || 'var(--mist)',
+                            color: APPOINTMENT_STATUS_CONFIG[appt.status]?.color || 'var(--ash)',
                             width: 'fit-content',
                         }}>
-                            {appt.status}
+                            {APPOINTMENT_STATUS_CONFIG[appt.status]?.label[lang] || appt.status}
                         </span>
                         <div style={{ fontSize: 12, color: 'var(--fog)' }}>{formatDate(appt.created_at)}</div>
                     </div>

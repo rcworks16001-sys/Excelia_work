@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import api from '../../../../lib/api';
-import { STATUSES as LEAD_STATUSES, STATUS_CONFIG as LEAD_STATUS_CONFIG } from '../../../../lib/statusConfig';
+import { STATUSES as LEAD_STATUSES, STATUS_CONFIG as LEAD_STATUS_CONFIG, APPOINTMENT_STATUS_CONFIG } from '../../../../lib/statusConfig';
 import { useDashboardLanguage } from '../../../../lib/useDashboardLanguage';
 import { dashboardStrings } from '../../../../lib/dashboardStrings';
 
@@ -19,13 +19,6 @@ const formatXOF = (amount) => {
     const n = Math.round(Number(amount));
     if (!Number.isFinite(n)) return '';
     return `${Math.abs(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} F CFA`;
-};
-
-const STATUS_COLORS = {
-    pending: { bg: 'var(--yellow)', color: 'var(--ink)' },
-    confirmed: { bg: 'var(--green)', color: 'var(--ink)' },
-    cancelled: { bg: 'var(--mist)', color: 'var(--fog)' },
-    completed: { bg: 'var(--ink)', color: '#fff' },
 };
 
 // Chat-bubble alignment: user messages left, bot replies right.
@@ -45,6 +38,9 @@ export default function LeadDetailPage() {
     const [error, setError] = useState('');
     const [statusSaving, setStatusSaving] = useState(false);
     const [statusError, setStatusError] = useState('');
+    const [replyText, setReplyText] = useState('');
+    const [sending, setSending] = useState(false);
+    const [sendError, setSendError] = useState('');
     const [lang] = useDashboardLanguage();
     const t = dashboardStrings[lang].leadDetail;
 
@@ -68,6 +64,32 @@ export default function LeadDetailPage() {
             setStatusError(t.statusUpdateError);
         } finally {
             setStatusSaving(false);
+        }
+    };
+
+    const handleSendReply = async () => {
+        const message = replyText.trim();
+        if (!message || sending) return;
+
+        setSendError('');
+        setSending(true);
+        try {
+            await api.post(`/leads/${params.id}/reply`, { message });
+            // Not persisted server-side (by design — see CLAUDE.md task notes),
+            // so append it to local state only; it won't survive a refresh.
+            setConversations((prev) => [
+                ...prev,
+                { id: `local-${Date.now()}`, sender: 'bot', message, created_at: new Date().toISOString() },
+            ]);
+            setReplyText('');
+        } catch (err) {
+            if (err.response?.status === 401) {
+                router.push('/login');
+                return;
+            }
+            setSendError(t.sendError);
+        } finally {
+            setSending(false);
         }
     };
 
@@ -110,7 +132,7 @@ export default function LeadDetailPage() {
             <Link href="/dashboard" style={{ fontSize: 12, color: 'var(--fog)', textDecoration: 'none' }}>{t.backLink}</Link>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 10, marginBottom: 4, flexWrap: 'wrap' }}>
-                <h1 style={{ fontSize: 26, fontWeight: 800 }}>{lead.name || 'Unknown'}</h1>
+                <h1 style={{ fontSize: 26, fontWeight: 800 }}>{lead.name || t.unknownName}</h1>
                 <span className="badge" style={{ background: 'var(--mist)', color: 'var(--ash)' }}>
                     {(lead.language || '').toUpperCase()}
                 </span>
@@ -172,6 +194,41 @@ export default function LeadDetailPage() {
                             </div>
                         ))}
                     </div>
+
+                    <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                        <textarea
+                            value={replyText}
+                            onChange={(e) => setReplyText(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                    e.preventDefault();
+                                    handleSendReply();
+                                }
+                            }}
+                            placeholder={t.replyPlaceholder}
+                            disabled={sending}
+                            rows={2}
+                            style={{
+                                flex: 1, padding: '10px 14px', fontSize: 13, fontFamily: 'inherit',
+                                border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)',
+                                outline: 'none', resize: 'vertical', color: 'var(--ink)',
+                            }}
+                        />
+                        <button
+                            onClick={handleSendReply}
+                            disabled={sending || !replyText.trim()}
+                            style={{
+                                padding: '0 18px', fontSize: 13, fontWeight: 700,
+                                background: 'var(--ink)', color: '#fff', border: 'none',
+                                borderRadius: 'var(--r-btn)',
+                                cursor: sending || !replyText.trim() ? 'default' : 'pointer',
+                                opacity: sending || !replyText.trim() ? 0.6 : 1,
+                            }}
+                        >
+                            {sending ? t.sending : t.send}
+                        </button>
+                    </div>
+                    {sendError && <div style={{ fontSize: 12, color: '#b91c1c', marginTop: 6 }}>{sendError}</div>}
                 </div>
 
                 {/* Appointments */}
@@ -194,10 +251,10 @@ export default function LeadDetailPage() {
                                     {appt.type} — {appt.neighbourhood}, {appt.city}
                                 </div>
                                 <span className="badge" style={{
-                                    background: STATUS_COLORS[appt.status]?.bg || 'var(--mist)',
-                                    color: STATUS_COLORS[appt.status]?.color || 'var(--ash)',
+                                    background: APPOINTMENT_STATUS_CONFIG[appt.status]?.bg || 'var(--mist)',
+                                    color: APPOINTMENT_STATUS_CONFIG[appt.status]?.color || 'var(--ash)',
                                 }}>
-                                    {appt.status}
+                                    {APPOINTMENT_STATUS_CONFIG[appt.status]?.label[lang] || appt.status}
                                 </span>
                             </div>
                             <div style={{ fontSize: 12, color: 'var(--ash)', marginBottom: 4 }}>{formatXOF(appt.price)}</div>

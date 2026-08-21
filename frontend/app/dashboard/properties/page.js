@@ -150,6 +150,7 @@ export default function PropertiesPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [typeFilter, setTypeFilter] = useState('all');
+    const [search, setSearch] = useState('');
     const [lang] = useDashboardLanguage();
     const t = dashboardStrings[lang].properties;
 
@@ -176,7 +177,14 @@ export default function PropertiesPage() {
     };
 
     const types = ['all', ...Object.keys(t.typeLabels)];
-    const filtered = typeFilter === 'all' ? properties : properties.filter((p) => p.type === typeFilter);
+    const filtered = properties.filter((p) => {
+        if (typeFilter !== 'all' && p.type !== typeFilter) return false;
+        if (!search) return true;
+        const q = search.toLowerCase();
+        return (p.neighbourhood || '').toLowerCase().includes(q)
+            || (p.city || '').toLowerCase().includes(q)
+            || (p.description || '').toLowerCase().includes(q);
+    });
 
     return (
         <div>
@@ -200,6 +208,17 @@ export default function PropertiesPage() {
                     </button>
                 ))}
             </div>
+
+            <input
+                type="text"
+                placeholder={t.searchPlaceholder}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={{
+                    padding: '9px 14px', border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)',
+                    fontSize: 13, outline: 'none', width: 260, marginBottom: 20, color: 'var(--ink)',
+                }}
+            />
 
             {error && <div style={{ color: '#b91c1c', fontSize: 13, marginBottom: 16 }}>{error}</div>}
 

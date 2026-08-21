@@ -201,6 +201,43 @@ const updateStatus = async (req, res) => {
     }
 };
 
+// ── sendReply(id, message) ──
+// Admin-typed WhatsApp reply, sent from the dashboard's lead detail page.
+// Looks up the RAW (unmasked) phone directly — this is the one place that's
+// allowed, since it's used server-side only and never returned in the
+// response (CLAUDE.md: never send a user's WhatsApp number to the frontend).
+// sendWhatsAppMessage is required lazily here, not at module top, to avoid a
+// require cycle: webhookController.js already requires this file.
+const sendReply = async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+        return res.status(400).json({ error: 'Invalid lead id' });
+    }
+
+    const { message } = req.body || {};
+    if (typeof message !== 'string' || message.trim().length === 0) {
+        return res.status(400).json({ error: 'message is required' });
+    }
+
+    try {
+        const result = await pool.query('SELECT phone FROM leads WHERE id = $1', [id]);
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Lead not found' });
+        }
+
+        const { sendWhatsAppMessage } = require('./webhookController');
+        const sent = await sendWhatsAppMessage(result.rows[0].phone, message.trim());
+        if (!sent) {
+            return res.status(502).json({ error: 'Failed to send WhatsApp message' });
+        }
+
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error sending lead reply:', error);
+        res.status(500).json({ error: 'Failed to send message' });
+    }
+};
+
 module.exports = {
     getOrCreateLead,
     getLeadState,
@@ -211,5 +248,6 @@ module.exports = {
     list,
     getById,
     updateStatus,
+    sendReply,
     VALID_STATUSES,
 };

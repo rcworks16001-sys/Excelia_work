@@ -12,4 +12,7 @@ router.get('/:id', authenticateAdmin, leadController.getById);
 // PATCH /api/leads/:id/status — update pipeline stage, body: { status }
 router.patch('/:id/status', authenticateAdmin, leadController.updateStatus);
 
+// POST /api/leads/:id/reply — send a plain WhatsApp text reply, body: { message }
+router.post('/:id/reply', authenticateAdmin, leadController.sendReply);
+
 module.exports = router;

@@ -47,6 +47,10 @@ const verify = (req, res) => {
 };
 
 // ── Send WhatsApp message ──
+// Returns true/false so callers that need to know (e.g. the admin dashboard's
+// reply-to-lead endpoint) can report success/failure. Still never throws —
+// the bot's own inbound-message handling must keep working even if a send
+// fails, so the error is caught and logged here either way.
 const sendWhatsAppMessage = async (to, message) => {
     try {
         await axios.post(
@@ -64,8 +68,10 @@ const sendWhatsAppMessage = async (to, message) => {
                 }
             }
         );
+        return true;
     } catch (error) {
         console.error('Error sending WhatsApp message:', error.response?.data);
+        return false;
     }
 };
 

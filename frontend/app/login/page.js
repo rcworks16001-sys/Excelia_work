@@ -60,9 +60,12 @@ export default function LoginPage() {
                 border: '1px solid var(--ice)', borderRadius: 'var(--r-card)',
                 padding: 36,
             }}>
-                <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: 1, color: 'var(--ink)', marginBottom: 4 }}>
-                    {t.productName}
-                </div>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                    src="/logo.jpeg"
+                    alt={t.productName}
+                    style={{ width: '100%', maxWidth: 220, height: 'auto', display: 'block', marginBottom: 8 }}
+                />
                 <div style={{ fontSize: 13, color: 'var(--fog)', marginBottom: 28 }}>
                     {t.subtitle}
                 </div>
