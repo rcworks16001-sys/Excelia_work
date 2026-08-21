@@ -21,6 +21,7 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, on
     const [videoError, setVideoError] = useState('');
     const [deleting, setDeleting] = useState(false);
     const [deleteError, setDeleteError] = useState('');
+    const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const photos = property.photos || [];
     const hasPhoto = photos.length > 0;
     // The full enlargeable gallery for this listing, in display order — photo
@@ -96,9 +97,17 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, on
         }
     };
 
-    const handleDeleteProperty = async () => {
-        if (!window.confirm(t.deletePropertyConfirm)) return;
+    // Two-step: the button opens an in-app confirm dialog naming this exact
+    // listing, rather than a bare window.confirm() — the admin should see
+    // which property they're about to permanently remove, not just a generic
+    // browser prompt.
+    const handleDeleteProperty = () => {
         setDeleteError('');
+        setShowDeleteConfirm(true);
+    };
+
+    const confirmDeleteProperty = async () => {
+        setShowDeleteConfirm(false);
         setDeleting(true);
         try {
             await api.delete(`/properties/${property.id}`);
@@ -267,6 +276,54 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, on
                 </div>
                 {deleteError && <div style={{ fontSize: 11, color: '#b91c1c', marginTop: 6 }}>{deleteError}</div>}
             </div>
+
+            {showDeleteConfirm && (
+                <div
+                    onClick={() => setShowDeleteConfirm(false)}
+                    style={{
+                        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+                    }}
+                >
+                    <div
+                        onClick={(e) => e.stopPropagation()}
+                        style={{
+                            background: '#fff', borderRadius: 'var(--r-card)', padding: 24,
+                            width: '100%', maxWidth: 360,
+                        }}
+                    >
+                        <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8, color: 'var(--ink)' }}>
+                            {t.deletePropertyTitle}
+                        </div>
+                        <div style={{ fontSize: 13, color: 'var(--ash)', marginBottom: 4 }}>
+                            {t.typeLabels[property.type] || property.type} — {property.neighbourhood}, {property.city} · {formatXOF(property.price)}
+                        </div>
+                        <div style={{ fontSize: 12, color: '#b91c1c', marginBottom: 20 }}>
+                            {t.deletePropertyWarning}
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                            <button
+                                onClick={() => setShowDeleteConfirm(false)}
+                                style={{
+                                    fontSize: 13, fontWeight: 600, padding: '8px 16px', borderRadius: 'var(--r-btn)',
+                                    border: '1px solid var(--ice)', background: '#fff', color: 'var(--ash)', cursor: 'pointer',
+                                }}
+                            >
+                                {t.addCancel}
+                            </button>
+                            <button
+                                onClick={confirmDeleteProperty}
+                                style={{
+                                    fontSize: 13, fontWeight: 700, padding: '8px 16px', borderRadius: 'var(--r-btn)',
+                                    border: 'none', background: '#b91c1c', color: '#fff', cursor: 'pointer',
+                                }}
+                            >
+                                {t.deleteProperty}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

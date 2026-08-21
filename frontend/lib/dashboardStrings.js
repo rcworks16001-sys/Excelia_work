@@ -122,7 +122,8 @@ export const dashboardStrings = {
             addSaving: 'Création…',
             addError: 'Échec de la création. Vérifiez les champs.',
             deleteProperty: 'Supprimer',
-            deletePropertyConfirm: 'Supprimer ce bien ? Cette action est irréversible.',
+            deletePropertyTitle: 'Supprimer ce bien ?',
+            deletePropertyWarning: 'Cette action est irréversible.',
             deletePropertyError: 'Échec de la suppression.',
         },
         appointments: {
@@ -243,7 +244,8 @@ export const dashboardStrings = {
             addSaving: 'Creating…',
             addError: 'Failed to create. Check the fields.',
             deleteProperty: 'Delete',
-            deletePropertyConfirm: 'Delete this property? This cannot be undone.',
+            deletePropertyTitle: 'Delete this property?',
+            deletePropertyWarning: 'This cannot be undone.',
             deletePropertyError: 'Failed to delete.',
         },
         appointments: {
