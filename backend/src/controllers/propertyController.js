@@ -1,5 +1,6 @@
 const pool = require('../db/index');
 const cloudinary = require('../utils/cloudinary');
+const { translateToEnglish, translateToFrench } = require('../utils/translate');
 
 // Columns the bot and dashboard actually need — never SELECT *.
 const PROPERTY_COLUMNS = `
@@ -265,8 +266,19 @@ const deleteVideo = async (req, res) => {
 // New listing from the dashboard's "Add property" form. agency_contact is
 // never taken from the request — always the single static office number,
 // matching the existing client decision (see EXCELIA_OFFICE_CONTACT above).
+//
+// descriptionLang tells us which language the admin actually typed in
+// ('fr' default, or 'en'). `description` is treated as the French column
+// everywhere else in the app (bot replies, dashboard FR mode, search), so
+// whichever language WASN'T typed gets machine-translated once, right here
+// at creation time — same write-time-only pattern as the bulk backfill
+// script, just triggered per-listing instead of in a batch. A translation
+// failure never blocks creation: it just leaves the missing side to be
+// picked up by a later `npm run backfill-translations` run (or, for the
+// French column specifically — since it's shown by default and must never
+// be empty — falls back to the raw typed text rather than leaving it blank).
 const create = async (req, res) => {
-    const { city, neighbourhood, type, price, bedrooms, description } = req.body || {};
+    const { city, neighbourhood, type, price, bedrooms, description, descriptionLang } = req.body || {};
 
     if (typeof city !== 'string' || !city.trim()) {
         return res.status(400).json({ error: 'city is required' });
@@ -289,12 +301,28 @@ const create = async (req, res) => {
         }
     }
 
+    const typedDescription = description && description.trim() ? description.trim() : null;
+    let descriptionFr = typedDescription;
+    let descriptionEn = null;
+
+    if (typedDescription) {
+        if (descriptionLang === 'en') {
+            descriptionEn = typedDescription;
+            const translated = await translateToFrench(typedDescription);
+            // French column is the one shown by default and read by the bot —
+            // never leave it blank just because the API call failed.
+            descriptionFr = translated || typedDescription;
+        } else {
+            descriptionEn = await translateToEnglish(typedDescription); // null on failure — EN mode falls back to French, same as any pre-existing listing
+        }
+    }
+
     try {
         const result = await pool.query(
-            `INSERT INTO properties (city, neighbourhood, type, price, bedrooms, description, photos, agency_contact)
-             VALUES ($1, $2, $3, $4, $5, $6, '{}', $7)
+            `INSERT INTO properties (city, neighbourhood, type, price, bedrooms, description, description_en, photos, agency_contact)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', $8)
              RETURNING ${PROPERTY_COLUMNS}`,
-            [city.trim(), neighbourhood.trim(), type, priceNum, bedroomsNum, description || null, EXCELIA_OFFICE_CONTACT]
+            [city.trim(), neighbourhood.trim(), type, priceNum, bedroomsNum, descriptionFr, descriptionEn, EXCELIA_OFFICE_CONTACT]
         );
         res.status(201).json({ property: result.rows[0] });
     } catch (error) {

@@ -434,7 +434,7 @@ function Lightbox({ gallery, onClose }) {
     );
 }
 
-const ADD_FORM_DEFAULTS = { city: '', neighbourhood: '', type: '', price: '', bedrooms: '', description: '' };
+const ADD_FORM_DEFAULTS = { city: '', neighbourhood: '', type: '', price: '', bedrooms: '', description: '', descriptionLang: 'fr' };
 
 export default function PropertiesPage() {
     const router = useRouter();
@@ -493,6 +493,7 @@ export default function PropertiesPage() {
                 price: addForm.price ? Number(addForm.price) : undefined,
                 bedrooms: addForm.bedrooms === '' ? null : Number(addForm.bedrooms),
                 description: addForm.description || null,
+                descriptionLang: addForm.descriptionLang,
             });
             setProperties((prev) => [response.data.property, ...prev]);
             setAddForm(ADD_FORM_DEFAULTS);
@@ -580,7 +581,30 @@ export default function PropertiesPage() {
                             style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)', outline: 'none', color: 'var(--ink)' }} />
                     </div>
                     <div style={{ gridColumn: '1 / -1' }}>
-                        <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--ash)', marginBottom: 4 }}>{t.addFieldDescription}</label>
+                        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 4 }}>
+                            <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--ash)' }}>{t.addFieldDescription}</label>
+                            {/* Which language was actually typed — the OTHER
+                                language is auto-translated on save (Claude),
+                                since `description` is always treated as
+                                French everywhere else in the app. */}
+                            <div style={{ display: 'flex', gap: 2 }}>
+                                {['fr', 'en'].map((code) => (
+                                    <button
+                                        key={code}
+                                        type="button"
+                                        onClick={() => setAddForm((f) => ({ ...f, descriptionLang: code }))}
+                                        style={{
+                                            fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 6,
+                                            border: '1px solid var(--ice)', cursor: 'pointer',
+                                            background: addForm.descriptionLang === code ? 'var(--ink)' : '#fff',
+                                            color: addForm.descriptionLang === code ? '#fff' : 'var(--ash)',
+                                        }}
+                                    >
+                                        {code.toUpperCase()}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
                         <textarea rows={2} value={addForm.description} onChange={(e) => setAddForm((f) => ({ ...f, description: e.target.value }))}
                             style={{ width: '100%', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)', outline: 'none', resize: 'vertical', color: 'var(--ink)' }} />
                     </div>

@@ -68,4 +68,42 @@ ${GLOSSARY}`,
     }
 };
 
-module.exports = { translateToEnglish };
+// ── translateToFrench(englishText) ──
+// The reverse direction — needed because the dashboard's "Add property" form
+// lets an admin type the description in either language; whichever one they
+// DIDN'T type has to come from somewhere. Same never-throws/null-on-failure
+// contract as translateToEnglish.
+const translateToFrench = async (englishText) => {
+    if (!englishText || !englishText.trim()) return null;
+
+    try {
+        const response = await anthropic.messages.create({
+            model: TRANSLATION_MODEL,
+            max_tokens: 500,
+            temperature: 0,
+            system: `You translate English real-estate listing descriptions (Togo market) into natural French.
+
+Rules:
+- Output ONLY the translated sentence. No preamble, no quotes, no notes.
+- Keep it the same length and tone — this is a short listing blurb, not prose.
+- Keep proper nouns (neighbourhoods, cities like Lomé, Noèpé) exactly as written.
+- Do NOT convert or reword prices, measurements, or numbers.
+- Use this vocabulary for consistency with the rest of the app (reversed — translate INTO the French term on the left):
+${GLOSSARY}`,
+            messages: [{ role: 'user', content: englishText }],
+        });
+
+        const translated = response.content
+            ?.filter((block) => block.type === 'text')
+            .map((block) => block.text)
+            .join('')
+            .trim();
+
+        return translated || null;
+    } catch (error) {
+        console.error('translateToFrench failed:', error.message);
+        return null;
+    }
+};
+
+module.exports = { translateToEnglish, translateToFrench };
