@@ -8,9 +8,11 @@ import { APPOINTMENT_STATUS_CONFIG } from '../../../lib/statusConfig';
 import { useDashboardLanguage } from '../../../lib/useDashboardLanguage';
 import { dashboardStrings } from '../../../lib/dashboardStrings';
 
-const formatDate = (date) => {
+// Locale follows the dashboard toggle, so date/time text stays consistent
+// with everything else on the page instead of always rendering English-style.
+const formatDate = (date, lang) => {
     if (!date) return '—';
-    return new Date(date).toLocaleString('en-GB', {
+    return new Date(date).toLocaleString(lang === 'fr' ? 'fr-FR' : 'en-GB', {
         day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
     });
 };
@@ -133,9 +135,15 @@ export default function AppointmentsPage() {
                             <div style={{ fontSize: 11, color: 'var(--fog)' }}>{formatXOF(appt.price)}</div>
                         </div>
                         <div>
-                            <div style={{ fontSize: 12 }}>{appt.requested_datetime_text}</div>
-                            {appt.requested_datetime && (
-                                <div style={{ fontSize: 11, color: 'var(--fog)' }}>{formatDate(appt.requested_datetime)}</div>
+                            {lang === 'en' && appt.requested_datetime ? (
+                                <div style={{ fontSize: 12 }}>{formatDate(appt.requested_datetime, lang)}</div>
+                            ) : (
+                                <>
+                                    <div style={{ fontSize: 12 }}>{appt.requested_datetime_text}</div>
+                                    {appt.requested_datetime && (
+                                        <div style={{ fontSize: 11, color: 'var(--fog)' }}>{formatDate(appt.requested_datetime, lang)}</div>
+                                    )}
+                                </>
                             )}
                         </div>
                         <span className="badge" style={{
@@ -145,7 +153,7 @@ export default function AppointmentsPage() {
                         }}>
                             {APPOINTMENT_STATUS_CONFIG[appt.status]?.label[lang] || appt.status}
                         </span>
-                        <div style={{ fontSize: 12, color: 'var(--fog)' }}>{formatDate(appt.created_at)}</div>
+                        <div style={{ fontSize: 12, color: 'var(--fog)' }}>{formatDate(appt.created_at, lang)}</div>
                     </div>
                 ))}
             </div>

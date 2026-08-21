@@ -8,9 +8,11 @@ import { STATUSES as LEAD_STATUSES, STATUS_CONFIG as LEAD_STATUS_CONFIG, APPOINT
 import { useDashboardLanguage } from '../../../../lib/useDashboardLanguage';
 import { dashboardStrings } from '../../../../lib/dashboardStrings';
 
-const formatDate = (date) => {
+// Locale follows the dashboard toggle, so date/time text stays consistent
+// with everything else on the page instead of always rendering English-style.
+const formatDate = (date, lang) => {
     if (!date) return '—';
-    return new Date(date).toLocaleString('en-GB', {
+    return new Date(date).toLocaleString(lang === 'fr' ? 'fr-FR' : 'en-GB', {
         day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
     });
 };
@@ -159,7 +161,7 @@ export default function LeadDetailPage() {
             {statusError && <div style={{ fontSize: 12, color: '#b91c1c', marginBottom: 8 }}>{statusError}</div>}
             <div style={{ fontSize: 13, color: 'var(--fog)', fontFamily: 'monospace', marginBottom: 4 }}>{lead.phone}</div>
             <div style={{ fontSize: 12, color: 'var(--fog)', marginBottom: 28 }}>
-                {t.firstContact} {formatDate(lead.created_at)} · {t.lastMessage} {formatDate(lead.last_message_at)}
+                {t.firstContact} {formatDate(lead.created_at, lang)} · {t.lastMessage} {formatDate(lead.last_message_at, lang)}
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: 24 }}>
@@ -189,7 +191,7 @@ export default function LeadDetailPage() {
                                     fontSize: 10, marginTop: 6, opacity: 0.65,
                                     color: msg.sender === 'bot' ? '#fff' : 'var(--fog)',
                                 }}>
-                                    {formatDate(msg.created_at)}
+                                    {formatDate(msg.created_at, lang)}
                                 </div>
                             </div>
                         ))}
@@ -259,8 +261,15 @@ export default function LeadDetailPage() {
                             </div>
                             <div style={{ fontSize: 12, color: 'var(--ash)', marginBottom: 4 }}>{formatXOF(appt.price)}</div>
                             <div style={{ fontSize: 12, color: 'var(--fog)' }}>
-                                {t.requested} {appt.requested_datetime_text}
-                                {appt.requested_datetime && ` (${formatDate(appt.requested_datetime)})`}
+                                {t.requested}{' '}
+                                {lang === 'en' && appt.requested_datetime
+                                    ? formatDate(appt.requested_datetime, lang)
+                                    : (
+                                        <>
+                                            {appt.requested_datetime_text}
+                                            {appt.requested_datetime && ` (${formatDate(appt.requested_datetime, lang)})`}
+                                        </>
+                                    )}
                             </div>
                         </div>
                     ))}
