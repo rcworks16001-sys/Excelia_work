@@ -23,6 +23,13 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, on
     const [deleteError, setDeleteError] = useState('');
     const photos = property.photos || [];
     const hasPhoto = photos.length > 0;
+    // The full enlargeable gallery for this listing, in display order — photo
+    // thumbnails first, walkthrough video last (if any) — so the lightbox can
+    // navigate between all of a property's media, not just one item at a time.
+    const galleryItems = [
+        ...photos.map((url) => ({ type: 'image', url })),
+        ...(property.video_url ? [{ type: 'video', url: property.video_url }] : []),
+    ];
     // description is authored in French; description_en is the cached one-time
     // translation. Falls back to French if this listing hasn't been translated
     // yet (run `npm run backfill-translations` in backend/ to fill new ones).
@@ -109,7 +116,7 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, on
         <div style={{ background: '#fff', border: '1px solid var(--ice)', borderRadius: 'var(--r-card)', overflow: 'hidden' }}>
             {/* Cover photo, or a clear placeholder if none uploaded yet. */}
             <div
-                onClick={() => hasPhoto && onEnlarge('image', photos[0])}
+                onClick={() => hasPhoto && onEnlarge(galleryItems, 0)}
                 style={{
                     height: 140, background: 'var(--mist)', display: 'flex',
                     alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 4, position: 'relative',
@@ -145,13 +152,13 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, on
                 {/* Photo thumbnails — click to enlarge, × to remove */}
                 {hasPhoto && (
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
-                        {photos.map((url) => (
+                        {photos.map((url, photoIndex) => (
                             <div key={url} style={{ position: 'relative', width: 44, height: 44 }}>
                                 {/* eslint-disable-next-line @next/next/no-img-element */}
                                 <img
                                     src={url}
                                     alt=""
-                                    onClick={() => onEnlarge('image', url)}
+                                    onClick={() => onEnlarge(galleryItems, photoIndex)}
                                     style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--ice)', cursor: 'zoom-in' }}
                                 />
                                 <button
@@ -196,7 +203,7 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, on
                 {property.video_url && (
                     <div style={{ marginBottom: 10 }}>
                         <div
-                            onClick={() => onEnlarge('video', property.video_url)}
+                            onClick={() => onEnlarge(galleryItems, galleryItems.length - 1)}
                             style={{
                                 position: 'relative', width: 44, height: 44, borderRadius: 6,
                                 border: '1px solid var(--ice)', overflow: 'hidden', cursor: 'zoom-in', background: '#000',
@@ -277,16 +284,44 @@ function SkeletonCard() {
     );
 }
 
-// Fullscreen overlay for an enlarged photo or video. Closes on backdrop
-// click, × button, or Escape.
-function Lightbox({ media, onClose }) {
+// Fullscreen overlay for a property's full media gallery (photos + video).
+// Closes on backdrop click, × button, or Escape. Navigates with the
+// on-screen ‹ › buttons or the Left/Right arrow keys, wrapping around at
+// either end so browsing feels continuous.
+function Lightbox({ gallery, onClose }) {
+    const [index, setIndex] = useState(0);
+
+    // Reset to whichever item was actually clicked, every time a NEW gallery
+    // is opened (not on every re-render — gallery is a fresh array each
+    // render, so key off its identity via the items themselves changing).
     useEffect(() => {
-        const onKeyDown = (e) => { if (e.key === 'Escape') onClose(); };
+        if (gallery) setIndex(gallery.startIndex);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [gallery?.items, gallery?.startIndex]);
+
+    const items = gallery?.items || [];
+    const goPrev = () => setIndex((i) => (i - 1 + items.length) % items.length);
+    const goNext = () => setIndex((i) => (i + 1) % items.length);
+
+    useEffect(() => {
+        if (!gallery) return;
+        const onKeyDown = (e) => {
+            if (e.key === 'Escape') onClose();
+            else if (e.key === 'ArrowLeft' && items.length > 1) goPrev();
+            else if (e.key === 'ArrowRight' && items.length > 1) goNext();
+        };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-    }, [onClose]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [gallery, items.length, onClose]);
 
-    if (!media) return null;
+    if (!gallery || items.length === 0) return null;
+    const media = items[index];
+    const navButtonStyle = {
+        position: 'absolute', top: '50%', transform: 'translateY(-50%)', width: 44, height: 44, borderRadius: '50%',
+        border: 'none', background: 'rgba(255,255,255,0.15)', color: '#fff', fontSize: 22,
+        cursor: 'pointer', lineHeight: '44px', textAlign: 'center',
+    };
 
     return (
         <div
@@ -301,11 +336,25 @@ function Lightbox({ media, onClose }) {
                 style={{
                     position: 'absolute', top: 20, right: 24, width: 36, height: 36, borderRadius: '50%',
                     border: 'none', background: 'rgba(255,255,255,0.15)', color: '#fff', fontSize: 18,
-                    cursor: 'pointer', lineHeight: '36px', textAlign: 'center',
+                    cursor: 'pointer', lineHeight: '36px', textAlign: 'center', zIndex: 1,
                 }}
             >
                 ×
             </button>
+
+            {items.length > 1 && (
+                <>
+                    <button onClick={(e) => { e.stopPropagation(); goPrev(); }} style={{ ...navButtonStyle, left: 16 }}>‹</button>
+                    <button onClick={(e) => { e.stopPropagation(); goNext(); }} style={{ ...navButtonStyle, right: 16 }}>›</button>
+                    <div style={{
+                        position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)',
+                        color: '#fff', fontSize: 12, background: 'rgba(255,255,255,0.15)', padding: '4px 10px', borderRadius: 12,
+                    }}>
+                        {index + 1} / {items.length}
+                    </div>
+                </>
+            )}
+
             {media.type === 'image' ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
@@ -316,6 +365,7 @@ function Lightbox({ media, onClose }) {
                 />
             ) : (
                 <video
+                    key={media.url}
                     src={media.url}
                     controls
                     autoPlay
@@ -336,7 +386,7 @@ export default function PropertiesPage() {
     const [error, setError] = useState('');
     const [typeFilter, setTypeFilter] = useState('all');
     const [search, setSearch] = useState('');
-    const [enlarged, setEnlarged] = useState(null); // { type: 'image'|'video', url } | null
+    const [gallery, setGallery] = useState(null); // { items: [{type,url}], startIndex } | null
     const [showAddForm, setShowAddForm] = useState(false);
     const [addForm, setAddForm] = useState(ADD_FORM_DEFAULTS);
     const [addSaving, setAddSaving] = useState(false);
@@ -529,7 +579,7 @@ export default function PropertiesPage() {
                         onPhotosChanged={handlePhotosChanged}
                         onVideoChanged={handleVideoChanged}
                         onDeleted={handlePropertyDeleted}
-                        onEnlarge={(type, url) => setEnlarged({ type, url })}
+                        onEnlarge={(items, index) => setGallery({ items, startIndex: index })}
                         t={t}
                         lang={lang}
                     />
@@ -543,7 +593,7 @@ export default function PropertiesPage() {
                 </div>
             )}
 
-            <Lightbox media={enlarged} onClose={() => setEnlarged(null)} />
+            <Lightbox gallery={gallery} onClose={() => setGallery(null)} />
         </div>
     );
 }
