@@ -1,0 +1,72 @@
+/* Design tokens — copied from saas-mvp's globals.css per COPY_FROM_SAAS_MVP.md
+   (the "Design system" section). --canvas wasn't present in the source file
+   we could confirm; set here as a light neutral page background distinct
+   from --ice/--mist. */
+:root {
+    --ink: #000000;
+    --ice: #e5e7eb;
+    --mist: #f3f3f3;
+    --green: #d1ffca;
+    --yellow: #fff100;
+    --fog: #979797;
+    --ash: #444444;
+    --canvas: #fafafa;
+
+    --r-card: 24px;
+    --r-btn: 8px;
+    --r-nav: 12px;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    padding: 0;
+    margin: 0;
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+}
+
+a {
+    color: inherit;
+}
+
+input,
+select,
+button,
+textarea {
+    font-family: inherit;
+}
+
+@keyframes shimmer {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.4;
+    }
+}
+
+/* Shared skeleton loading block */
+.skeleton {
+    background: var(--ice);
+    border-radius: 4px;
+    animation: shimmer 1.6s ease-in-out infinite;
+}
+
+/* Shared status badge */
+.badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 11px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+}
