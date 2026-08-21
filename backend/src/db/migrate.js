@@ -41,6 +41,10 @@ const runMigrations = async () => {
         // next backfill run fills it in.
         await pool.query(`ALTER TABLE properties ADD COLUMN IF NOT EXISTS description_en TEXT;`);
 
+        // One optional walkthrough video per listing (not a gallery like
+        // `photos` — a single Cloudinary video URL, or NULL).
+        await pool.query(`ALTER TABLE properties ADD COLUMN IF NOT EXISTS video_url TEXT;`);
+
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_properties_city ON properties (city);`);
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_properties_neighbourhood ON properties (neighbourhood);`);
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_properties_type ON properties (type);`);

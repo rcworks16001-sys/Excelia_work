@@ -7,6 +7,9 @@ const propertyController = require('../controllers/propertyController');
 // Memory storage — files are streamed straight to Cloudinary, never written
 // to disk on this server.
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+// Separate instance for video — a property walkthrough is routinely well
+// over the 10MB photo limit above, so it needs its own higher ceiling.
+const uploadVideo = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 // GET /api/properties — full listing, for the dashboard's properties page
 router.get('/', authenticateAdmin, propertyController.list);
@@ -19,5 +22,11 @@ router.post('/:id/photos', authenticateAdmin, upload.single('photo'), propertyCo
 
 // DELETE /api/properties/:id/photos — body: { url } — detach a photo
 router.delete('/:id/photos', authenticateAdmin, propertyController.deletePhoto);
+
+// POST /api/properties/:id/video — upload/replace the listing's walkthrough video (multipart, field name "video")
+router.post('/:id/video', authenticateAdmin, uploadVideo.single('video'), propertyController.uploadVideo);
+
+// DELETE /api/properties/:id/video — clear the listing's video
+router.delete('/:id/video', authenticateAdmin, propertyController.deleteVideo);
 
 module.exports = router;

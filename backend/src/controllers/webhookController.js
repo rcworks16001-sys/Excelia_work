@@ -100,6 +100,30 @@ const sendWhatsAppImage = async (to, imageUrl, caption) => {
     }
 };
 
+// ── Send WhatsApp video ──
+// Same shape as sendWhatsAppImage — own message-type-per-call, per CLAUDE.md.
+const sendWhatsAppVideo = async (to, videoUrl, caption) => {
+    try {
+        await axios.post(
+            `https://graph.facebook.com/${GRAPH_API_VERSION}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+            {
+                messaging_product: 'whatsapp',
+                to: to,
+                type: 'video',
+                video: { link: videoUrl, caption }
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+    } catch (error) {
+        console.error('Error sending WhatsApp video:', error.response?.data);
+    }
+};
+
 // Sends photos for a shown listing (if it has any) and logs each send to the
 // conversation transcript. Capped — sending every photo for every listing
 // shown would flood the chat (up to 10 listings can be returned at once).
@@ -111,18 +135,31 @@ const sendListingPhotos = async (to, leadId, listings, lang) => {
 
     for (let i = 0; i < listingsToPhotograph.length; i += 1) {
         const listing = listingsToPhotograph[i];
-        if (!listing.photos || listing.photos.length === 0) continue;
-
         const typeLabel = PROPERTY_TYPE_LABELS[listing.type]?.[lang] ?? listing.type;
-        const photosToSend = listing.photos.slice(0, MAX_PHOTOS_PER_LISTING);
 
-        for (const photoUrl of photosToSend) {
+        if (listing.photos && listing.photos.length > 0) {
+            const photosToSend = listing.photos.slice(0, MAX_PHOTOS_PER_LISTING);
+            for (const photoUrl of photosToSend) {
+                const caption = `${i + 1}. ${typeLabel} — ${listing.neighbourhood}`;
+                await sendWhatsAppImage(to, photoUrl, caption);
+                try {
+                    await saveConversationMessage(leadId, 'bot', `[photo sent: ${photoUrl}]`);
+                } catch (logError) {
+                    console.error('Failed to log photo send to conversations:', logError.message);
+                }
+            }
+        }
+
+        // Video only for the #1-ranked listing, and only if it has one — a
+        // walkthrough video is a much heavier attachment than a photo, so
+        // sending one per listing shown (like photos) would be disruptive.
+        if (i === 0 && listing.video_url) {
             const caption = `${i + 1}. ${typeLabel} — ${listing.neighbourhood}`;
-            await sendWhatsAppImage(to, photoUrl, caption);
+            await sendWhatsAppVideo(to, listing.video_url, caption);
             try {
-                await saveConversationMessage(leadId, 'bot', `[photo sent: ${photoUrl}]`);
+                await saveConversationMessage(leadId, 'bot', `[video sent: ${listing.video_url}]`);
             } catch (logError) {
-                console.error('Failed to log photo send to conversations:', logError.message);
+                console.error('Failed to log video send to conversations:', logError.message);
             }
         }
     }
@@ -525,6 +562,7 @@ module.exports = {
     verify,
     sendWhatsAppMessage,
     sendWhatsAppImage,
+    sendWhatsAppVideo,
     handleMessage,
     extractSearchFilters,
     hasAnyFilter,

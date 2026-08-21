@@ -4,7 +4,7 @@ const cloudinary = require('../utils/cloudinary');
 // Columns the bot and dashboard actually need — never SELECT *.
 const PROPERTY_COLUMNS = `
     id, city, neighbourhood, type, price, bedrooms,
-    description, description_en, photos, latitude, longitude, agency_contact
+    description, description_en, photos, video_url, latitude, longitude, agency_contact
 `;
 
 const PRICE_TOLERANCE = 1.1; // 10% tolerance on price_max, per CLAUDE.md search rules
@@ -192,4 +192,64 @@ const deletePhoto = async (req, res) => {
     }
 };
 
-module.exports = { searchProperties, search, getPropertyById, list, uploadPhoto, deletePhoto, getKnownLocations };
+// ── uploadVideo(req, res) ──
+// Single-listing video, for the dashboard's "Upload video" button. Unlike
+// photos this is a single value, not an array — a new upload REPLACES
+// video_url rather than appending (mirrors how the bulk script treats it).
+const uploadVideo = async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+        return res.status(400).json({ error: 'Invalid property id' });
+    }
+    if (!req.file) {
+        return res.status(400).json({ error: 'No video file uploaded' });
+    }
+
+    try {
+        const uploadResult = await new Promise((resolve, reject) => {
+            const stream = cloudinary.uploader.upload_stream(
+                { folder: 'excelia/properties', resource_type: 'video' },
+                (error, result) => (error ? reject(error) : resolve(result))
+            );
+            stream.end(req.file.buffer);
+        });
+
+        const result = await pool.query(
+            'UPDATE properties SET video_url = $1 WHERE id = $2 RETURNING video_url',
+            [uploadResult.secure_url, id]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Property not found' });
+        }
+        res.json({ video_url: result.rows[0].video_url });
+    } catch (error) {
+        console.error('Error uploading property video:', error);
+        res.status(500).json({ error: 'Failed to upload video' });
+    }
+};
+
+// ── deleteVideo(req, res) ──
+// Clears video_url. Doesn't also delete the Cloudinary asset in this first
+// cut — same deliberate simplification as deletePhoto.
+const deleteVideo = async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+        return res.status(400).json({ error: 'Invalid property id' });
+    }
+
+    try {
+        const result = await pool.query(
+            'UPDATE properties SET video_url = NULL WHERE id = $1 RETURNING video_url',
+            [id]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Property not found' });
+        }
+        res.json({ video_url: result.rows[0].video_url });
+    } catch (error) {
+        console.error('Error deleting property video:', error);
+        res.status(500).json({ error: 'Failed to delete video' });
+    }
+};
+
+module.exports = { searchProperties, search, getPropertyById, list, uploadPhoto, deletePhoto, uploadVideo, deleteVideo, getKnownLocations };

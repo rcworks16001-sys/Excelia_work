@@ -12,10 +12,13 @@ const formatXOF = (amount) => {
     return `${Math.abs(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} F CFA`;
 };
 
-function PropertyCard({ property, onPhotosChanged, t, lang }) {
+function PropertyCard({ property, onPhotosChanged, onVideoChanged, t, lang }) {
     const fileInputRef = useRef(null);
+    const videoInputRef = useRef(null);
     const [uploading, setUploading] = useState(false);
     const [uploadError, setUploadError] = useState('');
+    const [videoUploading, setVideoUploading] = useState(false);
+    const [videoError, setVideoError] = useState('');
     const photos = property.photos || [];
     const hasPhoto = photos.length > 0;
     // description is authored in French; description_en is the cached one-time
@@ -48,6 +51,34 @@ function PropertyCard({ property, onPhotosChanged, t, lang }) {
             onPhotosChanged(property.id, response.data.photos);
         } catch (err) {
             setUploadError(t.deleteError);
+        }
+    };
+
+    const handleVideoChange = async (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file) return;
+
+        setVideoError('');
+        setVideoUploading(true);
+        try {
+            const formData = new FormData();
+            formData.append('video', file);
+            const response = await api.post(`/properties/${property.id}/video`, formData);
+            onVideoChanged(property.id, response.data.video_url);
+        } catch (err) {
+            setVideoError(t.videoUploadError);
+        } finally {
+            setVideoUploading(false);
+        }
+    };
+
+    const handleDeleteVideo = async () => {
+        try {
+            const response = await api.delete(`/properties/${property.id}/video`);
+            onVideoChanged(property.id, response.data.video_url);
+        } catch (err) {
+            setVideoError(t.videoDeleteError);
         }
     };
 
@@ -120,12 +151,52 @@ function PropertyCard({ property, onPhotosChanged, t, lang }) {
                     style={{
                         fontSize: 11, fontWeight: 600, padding: '6px 12px', borderRadius: 'var(--r-btn)',
                         border: '1px solid var(--ice)', background: 'var(--mist)', color: 'var(--ash)',
-                        cursor: uploading ? 'default' : 'pointer', marginBottom: 8,
+                        cursor: uploading ? 'default' : 'pointer', marginBottom: 8, marginRight: 6,
                     }}
                 >
                     {uploading ? t.uploading : t.uploadPhoto}
                 </button>
                 {uploadError && <div style={{ fontSize: 11, color: '#b91c1c', marginBottom: 8 }}>{uploadError}</div>}
+
+                {/* Walkthrough video — a single value, not a gallery like photos */}
+                {property.video_url && (
+                    <div style={{ marginBottom: 10 }}>
+                        <video
+                            src={property.video_url}
+                            controls
+                            style={{ width: '100%', borderRadius: 6, border: '1px solid var(--ice)', display: 'block' }}
+                        />
+                        <button
+                            onClick={handleDeleteVideo}
+                            style={{
+                                fontSize: 11, color: '#b91c1c', background: 'none', border: 'none',
+                                cursor: 'pointer', padding: 0, marginTop: 4,
+                            }}
+                        >
+                            {t.removeVideo}
+                        </button>
+                    </div>
+                )}
+
+                <input
+                    ref={videoInputRef}
+                    type="file"
+                    accept="video/*"
+                    onChange={handleVideoChange}
+                    style={{ display: 'none' }}
+                />
+                <button
+                    onClick={() => videoInputRef.current?.click()}
+                    disabled={videoUploading}
+                    style={{
+                        fontSize: 11, fontWeight: 600, padding: '6px 12px', borderRadius: 'var(--r-btn)',
+                        border: '1px solid var(--ice)', background: 'var(--mist)', color: 'var(--ash)',
+                        cursor: videoUploading ? 'default' : 'pointer', marginBottom: 8,
+                    }}
+                >
+                    {videoUploading ? t.uploading : (property.video_url ? t.replaceVideo : t.uploadVideo)}
+                </button>
+                {videoError && <div style={{ fontSize: 11, color: '#b91c1c', marginBottom: 8 }}>{videoError}</div>}
 
                 <div style={{ fontSize: 11, color: 'var(--fog)', borderTop: '1px solid var(--ice)', paddingTop: 8 }}>
                     {property.agency_contact}
@@ -180,6 +251,10 @@ export default function PropertiesPage() {
         setProperties((prev) => prev.map((p) => (p.id === propertyId ? { ...p, photos: newPhotos } : p)));
     };
 
+    const handleVideoChanged = (propertyId, newVideoUrl) => {
+        setProperties((prev) => prev.map((p) => (p.id === propertyId ? { ...p, video_url: newVideoUrl } : p)));
+    };
+
     const types = ['all', ...Object.keys(t.typeLabels)];
     const filtered = properties.filter((p) => {
         if (typeFilter !== 'all' && p.type !== typeFilter) return false;
@@ -230,7 +305,7 @@ export default function PropertiesPage() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 16 }}>
                 {loading && [1, 2, 3, 4, 5, 6].map((i) => <SkeletonCard key={i} />)}
                 {!loading && filtered.map((property) => (
-                    <PropertyCard key={property.id} property={property} onPhotosChanged={handlePhotosChanged} t={t} lang={lang} />
+                    <PropertyCard key={property.id} property={property} onPhotosChanged={handlePhotosChanged} onVideoChanged={handleVideoChanged} t={t} lang={lang} />
                 ))}
             </div>
 
