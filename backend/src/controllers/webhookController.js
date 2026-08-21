@@ -1,12 +1,11 @@
 const axios = require('axios');
-const cloudinary = require('cloudinary').v2;
 const Anthropic = require('@anthropic-ai/sdk');
 // zodOutputFormat expects v4-shaped schemas — see note in utils/language.js.
 const { z } = require('zod/v4');
 const { zodOutputFormat } = require('@anthropic-ai/sdk/helpers/zod');
 
 const pool = require('../db/index');
-const { searchProperties, getPropertyById } = require('./propertyController');
+const { searchProperties, getPropertyById, getKnownLocations } = require('./propertyController');
 const {
     getOrCreateLead,
     getLeadState,
@@ -19,11 +18,10 @@ const { createAppointment } = require('./appointmentController');
 const { detectLanguage, BOT_STRINGS, PROPERTY_TYPE_LABELS, DEFAULT_LANGUAGE } = require('../utils/language');
 const { formatXOF } = require('../utils/format');
 
-cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET,
-});
+// Cloudinary config lives in utils/cloudinary.js now (shared with the bulk
+// upload script and propertyController's photo endpoints). Nothing in this
+// file calls the Cloudinary SDK directly — sending a photo just needs the
+// already-hosted URL — so no import needed here.
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const NLU_MODEL = 'claude-haiku-4-5-20251001';
@@ -71,6 +69,59 @@ const sendWhatsAppMessage = async (to, message) => {
     }
 };
 
+// ── Send WhatsApp image ──
+// Per CLAUDE.md's WhatsApp message-type reference: each message type is its
+// own API call — this never gets combined with the text card into one call.
+const sendWhatsAppImage = async (to, imageUrl, caption) => {
+    try {
+        await axios.post(
+            `https://graph.facebook.com/${GRAPH_API_VERSION}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+            {
+                messaging_product: 'whatsapp',
+                to: to,
+                type: 'image',
+                image: { link: imageUrl, caption }
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+    } catch (error) {
+        console.error('Error sending WhatsApp image:', error.response?.data);
+    }
+};
+
+// Sends photos for a shown listing (if it has any) and logs each send to the
+// conversation transcript. Capped — sending every photo for every listing
+// shown would flood the chat (up to 10 listings can be returned at once).
+const MAX_LISTINGS_WITH_PHOTOS = 3;
+const MAX_PHOTOS_PER_LISTING = 2;
+
+const sendListingPhotos = async (to, leadId, listings, lang) => {
+    const listingsToPhotograph = listings.slice(0, MAX_LISTINGS_WITH_PHOTOS);
+
+    for (let i = 0; i < listingsToPhotograph.length; i += 1) {
+        const listing = listingsToPhotograph[i];
+        if (!listing.photos || listing.photos.length === 0) continue;
+
+        const typeLabel = PROPERTY_TYPE_LABELS[listing.type]?.[lang] ?? listing.type;
+        const photosToSend = listing.photos.slice(0, MAX_PHOTOS_PER_LISTING);
+
+        for (const photoUrl of photosToSend) {
+            const caption = `${i + 1}. ${typeLabel} — ${listing.neighbourhood}`;
+            await sendWhatsAppImage(to, photoUrl, caption);
+            try {
+                await saveConversationMessage(leadId, 'bot', `[photo sent: ${photoUrl}]`);
+            } catch (logError) {
+                console.error('Failed to log photo send to conversations:', logError.message);
+            }
+        }
+    }
+};
+
 // ── NLU: free text -> structured search filters ──
 // Bot-specific free-text parsing — not reused by the dashboard (which will
 // have its own explicit filter UI), so this lives here rather than in
@@ -87,27 +138,60 @@ const NLUSchema = z.object({
     bedrooms: z.number().int().nullable(),
 });
 
-const NLU_SYSTEM_PROMPT = `You are the natural-language-understanding engine for EXCELIA, a WhatsApp real estate chatbot for Togo. Read the incoming WhatsApp message (French or English — understand both) and classify it.
+// Builds the NLU system prompt, optionally injecting the list of known
+// cities/neighbourhoods so Claude can tell a bare neighbourhood name
+// ("Avédji") apart from a city name instead of guessing — without this list,
+// a message that only names a neighbourhood (no city) got misclassified as
+// { city: "Avedji", neighbourhood: null }, and the search then found nothing
+// even though a matching listing existed. knownLocations is
+// [{ city, neighbourhood }, ...] from propertyController.getKnownLocations();
+// pass [] to fall back to the plain prompt (e.g. if that query fails).
+const buildNluSystemPrompt = (knownLocations = []) => {
+    const neighbourhoodsByCity = {};
+    for (const { city, neighbourhood } of knownLocations) {
+        if (!city || !neighbourhood) continue;
+        if (!neighbourhoodsByCity[city]) neighbourhoodsByCity[city] = [];
+        if (!neighbourhoodsByCity[city].includes(neighbourhood)) {
+            neighbourhoodsByCity[city].push(neighbourhood);
+        }
+    }
+    const locationLines = Object.entries(neighbourhoodsByCity)
+        .map(([city, neighbourhoods]) => `- ${city}: ${neighbourhoods.join(', ')}`)
+        .join('\n');
+
+    const locationGuidance = locationLines
+        ? `\n\nKnown cities and their neighbourhoods currently in our listings — use this to tell a neighbourhood apart from a city (a name listed under a city below is a NEIGHBOURHOOD, not a city, even if the message doesn't mention the city at all):\n${locationLines}\n\nIf the message names a neighbourhood from this list, set "neighbourhood" to it and set "city" to the city it's listed under, even if the user didn't say the city. If a place name isn't in this list, use your best judgment.`
+        : '';
+
+    return `You are the natural-language-understanding engine for EXCELIA, a WhatsApp real estate chatbot for Togo. Read the incoming WhatsApp message (French or English — understand both) and classify it.
 
 Field guidance:
 - intent: "search" if the message expresses any interest in finding/renting/buying/viewing property, even with only one detail given (just a city, just a budget, etc). "off_topic" if clearly unrelated to real estate (weather, jokes, unrelated complaints, general chit-chat). "greeting" for pure greetings/small talk with zero property information ("Bonjour", "Hi", "Ça va ?"). "unclear" only if none of the above fit.
-- city / neighbourhood: the place name as the user meant it, with accents restored if dropped (e.g. "lome" -> "Lomé"). null if not mentioned.
+- city / neighbourhood: the place name as the user meant it, with accents restored if dropped (e.g. "lome" -> "Lomé"). null if not mentioned.${locationGuidance}
 - type: map the user's wording to exactly one of these enum values — "chambre_salon" (single room / studio / "une chambre"), "appartement" (unfurnished apartment), "villa", "terrain" (land / "parcelle"), "mini_villa", "appartement_meuble" (furnished apartment / "meublé"). null if the type is not clearly one of these — never guess a value outside this list.
 - price_max: the user's stated maximum budget as a plain integer number of XOF, with no currency symbol, spaces, or separators (e.g. "45000", "45 000 F CFA", "45k" -> 45000). Treat any stated budget as the maximum. null if no budget given.
 - bedrooms: integer number of bedrooms/chambres mentioned. null if not mentioned.
 
 Never fabricate a value you cannot support from the message. When genuinely uncertain about a field, use null rather than guessing.`;
+};
 
 const extractSearchFilters = async (text) => {
     const fallback = { intent: 'unclear', city: null, neighbourhood: null, type: null, price_max: null, bedrooms: null };
     if (!text || !text.trim()) return fallback;
+
+    let knownLocations = [];
+    try {
+        knownLocations = await getKnownLocations();
+    } catch (error) {
+        console.error('Failed to fetch known locations for NLU prompt, proceeding without them:', error.message);
+    }
 
     try {
         const response = await anthropic.messages.parse({
             model: NLU_MODEL,
             max_tokens: 400,
             temperature: 0,
-            system: NLU_SYSTEM_PROMPT,
+            system: buildNluSystemPrompt(knownLocations),
             messages: [{ role: 'user', content: text }],
             output_config: { format: zodOutputFormat(NLUSchema) },
         });
@@ -338,6 +422,7 @@ const handleMessage = async (req, res) => {
         await saveConversationMessage(leadId, 'user', text);
 
         let replyBody;
+        let listingsShown = null; // set only when search results were just sent, for the photo follow-up below
         if (lead.pendingAction === 'awaiting_viewing_selection') {
             replyBody = await handleViewingSelectionReply({
                 leadId,
@@ -378,6 +463,7 @@ const handleMessage = async (req, res) => {
                     // like "2" can be resolved back to a specific property.
                     replyBody = `${formatListingsSummary(listings, lang)}\n\n${BOT_STRINGS.booking_prompt[lang]}`;
                     await setPendingViewingSelection(leadId, listings.map((p) => p.id));
+                    listingsShown = listings;
                 }
             }
         }
@@ -392,6 +478,14 @@ const handleMessage = async (req, res) => {
             : replyBody;
 
         await replyAndLog(to, leadId, replyText);
+
+        // Photos follow the text card as separate messages, per CLAUDE.md's
+        // WhatsApp message-type rules — text first, then image calls, never
+        // combined. Only for listings that actually have photos uploaded.
+        if (listingsShown) {
+            await sendListingPhotos(to, leadId, listingsShown, lang);
+        }
+
         return res.sendStatus(200);
     } catch (error) {
         console.error('Error handling incoming message:', error);
@@ -411,6 +505,7 @@ const handleMessage = async (req, res) => {
 module.exports = {
     verify,
     sendWhatsAppMessage,
+    sendWhatsAppImage,
     handleMessage,
     extractSearchFilters,
     hasAnyFilter,

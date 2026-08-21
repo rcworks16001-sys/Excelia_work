@@ -1,4 +1,5 @@
 const pool = require('../db/index');
+const cloudinary = require('../utils/cloudinary');
 
 // Columns the bot and dashboard actually need — never SELECT *.
 const PROPERTY_COLUMNS = `
@@ -73,6 +74,17 @@ const searchProperties = async (filters = {}) => {
     return result.rows; // may still be empty
 };
 
+// ── getKnownLocations() ──
+// Distinct city/neighbourhood pairs currently in the properties table. Used
+// by the bot's NLU prompt (webhookController.js) so Claude can tell a bare
+// neighbourhood name ("Avédji") apart from a city name, instead of guessing.
+const getKnownLocations = async () => {
+    const result = await pool.query(
+        'SELECT DISTINCT city, neighbourhood FROM properties ORDER BY city, neighbourhood'
+    );
+    return result.rows; // [{ city, neighbourhood }, ...]
+};
+
 // ── list(req, res) ──
 // Full listing for the dashboard's properties page — all 13 seed listings,
 // not just the top matches searchProperties() would return.
@@ -114,4 +126,70 @@ const search = async (req, res) => {
     }
 };
 
-module.exports = { searchProperties, search, getPropertyById, list };
+// ── uploadPhoto(req, res) ──
+// Single-listing photo add, for the dashboard's "Upload photo" button.
+// Expects one file on req.file (multer memory storage, see routes/properties.js).
+// Streams straight to Cloudinary (no temp file on disk) and appends the
+// resulting URL to that listing's photos array.
+const uploadPhoto = async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+        return res.status(400).json({ error: 'Invalid property id' });
+    }
+    if (!req.file) {
+        return res.status(400).json({ error: 'No photo file uploaded' });
+    }
+
+    try {
+        const uploadResult = await new Promise((resolve, reject) => {
+            const stream = cloudinary.uploader.upload_stream(
+                { folder: 'excelia/properties' },
+                (error, result) => (error ? reject(error) : resolve(result))
+            );
+            stream.end(req.file.buffer);
+        });
+
+        const result = await pool.query(
+            'UPDATE properties SET photos = array_append(photos, $1) WHERE id = $2 RETURNING photos',
+            [uploadResult.secure_url, id]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Property not found' });
+        }
+        res.json({ photos: result.rows[0].photos });
+    } catch (error) {
+        console.error('Error uploading property photo:', error);
+        res.status(500).json({ error: 'Failed to upload photo' });
+    }
+};
+
+// ── deletePhoto(req, res) ──
+// Detaches a photo URL from a listing (body: { url }). Doesn't also delete
+// the Cloudinary asset in this first cut — a deliberate simplification, see
+// the Task 1 plan; easy to add cloudinary.uploader.destroy() later.
+const deletePhoto = async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+        return res.status(400).json({ error: 'Invalid property id' });
+    }
+    const { url } = req.body || {};
+    if (!url) {
+        return res.status(400).json({ error: 'url is required' });
+    }
+
+    try {
+        const result = await pool.query(
+            'UPDATE properties SET photos = array_remove(photos, $1) WHERE id = $2 RETURNING photos',
+            [url, id]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Property not found' });
+        }
+        res.json({ photos: result.rows[0].photos });
+    } catch (error) {
+        console.error('Error deleting property photo:', error);
+        res.status(500).json({ error: 'Failed to delete photo' });
+    }
+};
+
+module.exports = { searchProperties, search, getPropertyById, list, uploadPhoto, deletePhoto, getKnownLocations };

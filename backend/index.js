@@ -7,6 +7,7 @@ const webhookRoutes = require('./src/routes/webhook');
 const propertiesRoutes = require('./src/routes/properties');
 const leadsRoutes = require('./src/routes/leads');
 const appointmentsRoutes = require('./src/routes/appointments');
+const authRoutes = require('./src/routes/auth');
 
 const app = express();
 
@@ -18,6 +19,7 @@ app.use('/webhook', webhookRoutes);
 app.use('/api/properties', propertiesRoutes);
 app.use('/api/leads', leadsRoutes);
 app.use('/api/appointments', appointmentsRoutes);
+app.use('/api/auth', authRoutes);
 
 // Test route
 app.get('/', (req, res) => {

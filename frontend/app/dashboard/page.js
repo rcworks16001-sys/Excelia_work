@@ -4,14 +4,8 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import api from '../../lib/api';
 import { STATUSES, STATUS_CONFIG } from '../../lib/statusConfig';
-
-const timeAgo = (date) => {
-    const seconds = Math.floor((new Date() - new Date(date)) / 1000);
-    if (seconds < 60) return 'Just now';
-    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-    return `${Math.floor(seconds / 86400)}d ago`;
-};
+import { useDashboardLanguage } from '../../lib/useDashboardLanguage';
+import { dashboardStrings, formatTimeAgo } from '../../lib/dashboardStrings';
 
 const LANGUAGE_LABEL = { fr: 'FR', en: 'EN' };
 const GRID_COLUMNS = '1.8fr 1.3fr 0.7fr 1.2fr 1.1fr 1.1fr';
@@ -36,6 +30,8 @@ export default function LeadsOverviewPage() {
     const [error, setError] = useState('');
     const [search, setSearch] = useState('');
     const [statusFilter, setStatusFilter] = useState('all');
+    const [lang] = useDashboardLanguage();
+    const t = dashboardStrings[lang].leadsOverview;
 
     useEffect(() => {
         fetchLeads();
@@ -50,7 +46,7 @@ export default function LeadsOverviewPage() {
                 router.push('/login');
                 return;
             }
-            setError('Failed to load leads.');
+            setError(t.loadError);
         } finally {
             setLoading(false);
         }
@@ -68,18 +64,18 @@ export default function LeadsOverviewPage() {
     const weekCount = leads.filter((l) => now - new Date(l.created_at).getTime() < 7 * 24 * 60 * 60 * 1000).length;
 
     const stats = [
-        { label: 'Total leads', value: leads.length },
-        { label: 'New today', value: todayCount },
-        { label: 'New this week', value: weekCount },
+        { label: t.statTotal, value: leads.length },
+        { label: t.statToday, value: todayCount },
+        { label: t.statWeek, value: weekCount },
     ];
 
     const countFor = (status) => leads.filter((l) => l.status === status).length;
 
     return (
         <div>
-            <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: -0.5, marginBottom: 4 }}>Leads</h1>
+            <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: -0.5, marginBottom: 4 }}>{t.heading}</h1>
             <p style={{ fontSize: 13, color: 'var(--fog)', marginBottom: 24 }}>
-                Everyone who has contacted the WhatsApp bot
+                {t.subtitle}
             </p>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 14, marginBottom: 24 }}>
@@ -105,7 +101,7 @@ export default function LeadsOverviewPage() {
                         color: statusFilter === 'all' ? '#fff' : 'var(--ash)',
                     }}
                 >
-                    All ({leads.length})
+                    {t.all} ({leads.length})
                 </button>
                 {STATUSES.map((s) => (
                     <button
@@ -117,14 +113,14 @@ export default function LeadsOverviewPage() {
                             color: statusFilter === s ? '#fff' : 'var(--ash)',
                         }}
                     >
-                        {STATUS_CONFIG[s].label} ({countFor(s)})
+                        {STATUS_CONFIG[s].label[lang]} ({countFor(s)})
                     </button>
                 ))}
             </div>
 
             <input
                 type="text"
-                placeholder="Search by name or phone…"
+                placeholder={t.searchPlaceholder}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 style={{
@@ -140,7 +136,7 @@ export default function LeadsOverviewPage() {
                     display: 'grid', gridTemplateColumns: GRID_COLUMNS,
                     padding: '12px 20px', background: 'var(--mist)', borderBottom: '1px solid var(--ice)',
                 }}>
-                    {['Name', 'Phone', 'Lang', 'Status', 'First contact', 'Last message'].map((h) => (
+                    {[t.colName, t.colPhone, t.colLang, t.colStatus, t.colFirstContact, t.colLastMessage].map((h) => (
                         <div key={h} style={{ fontSize: 10, fontWeight: 800, color: 'var(--fog)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
                             {h}
                         </div>
@@ -152,9 +148,9 @@ export default function LeadsOverviewPage() {
                 {!loading && filteredLeads.length === 0 && (
                     <div style={{ padding: '56px 20px', textAlign: 'center' }}>
                         <div style={{ fontSize: 32, marginBottom: 10 }}>📭</div>
-                        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>No leads yet</div>
+                        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>{t.emptyTitle}</div>
                         <p style={{ fontSize: 13, color: 'var(--fog)' }}>
-                            {search || statusFilter !== 'all' ? 'Try a different search or filter.' : 'Leads appear here once the bot captures them.'}
+                            {search || statusFilter !== 'all' ? t.emptyFilterHint : t.emptyDefaultHint}
                         </p>
                     </div>
                 )}
@@ -169,7 +165,7 @@ export default function LeadsOverviewPage() {
                             borderBottom: i < filteredLeads.length - 1 ? '1px solid var(--ice)' : 'none',
                         }}
                     >
-                        <div style={{ fontSize: 13, fontWeight: 700 }}>{lead.name || 'Unknown'}</div>
+                        <div style={{ fontSize: 13, fontWeight: 700 }}>{lead.name || t.unknownName}</div>
                         <div style={{ fontSize: 12, color: 'var(--ash)', fontFamily: 'monospace' }}>{lead.phone}</div>
                         <span className="badge" style={{ background: 'var(--mist)', color: 'var(--ash)', width: 'fit-content' }}>
                             {LANGUAGE_LABEL[lead.language] || lead.language}
@@ -179,17 +175,17 @@ export default function LeadsOverviewPage() {
                             color: STATUS_CONFIG[lead.status]?.color || 'var(--ash)',
                             width: 'fit-content',
                         }}>
-                            {STATUS_CONFIG[lead.status]?.label || lead.status}
+                            {STATUS_CONFIG[lead.status]?.label[lang] || lead.status}
                         </span>
-                        <div style={{ fontSize: 12, color: 'var(--fog)' }}>{timeAgo(lead.created_at)}</div>
-                        <div style={{ fontSize: 12, color: 'var(--fog)' }}>{timeAgo(lead.last_message_at)}</div>
+                        <div style={{ fontSize: 12, color: 'var(--fog)' }}>{formatTimeAgo(lead.created_at, lang)}</div>
+                        <div style={{ fontSize: 12, color: 'var(--fog)' }}>{formatTimeAgo(lead.last_message_at, lang)}</div>
                     </div>
                 ))}
             </div>
 
             {!loading && (
                 <div style={{ marginTop: 10, fontSize: 12, color: 'var(--fog)', textAlign: 'right' }}>
-                    {filteredLeads.length} of {leads.length} leads
+                    {filteredLeads.length} {t.countOf} {leads.length} {t.countLeads}
                 </div>
             )}
         </div>

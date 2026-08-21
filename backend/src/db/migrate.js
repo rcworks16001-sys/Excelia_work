@@ -109,6 +109,16 @@ const runMigrations = async () => {
             'new', 'contacted', 'qualified', 'site_visit', 'converted', 'lost'
         ));`);
 
+        // Client decision: no per-agency contact numbers — every listing
+        // always shows the single EXCELIA office number. Updating seed.js
+        // alone wouldn't touch already-seeded live rows (seed.js skips
+        // re-seeding once properties has data), so this idempotent backfill
+        // is what actually changes what's live.
+        await pool.query(
+            `UPDATE properties SET agency_contact = $1 WHERE agency_contact IS DISTINCT FROM $1;`,
+            ['+228 91062626 — EXCELIA office']
+        );
+
         console.log('Migrations complete.');
         process.exit(0);
     } catch (error) {

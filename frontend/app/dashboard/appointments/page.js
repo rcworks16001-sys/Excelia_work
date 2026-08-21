@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import api from '../../../lib/api';
+import { useDashboardLanguage } from '../../../lib/useDashboardLanguage';
+import { dashboardStrings } from '../../../lib/dashboardStrings';
 
 const formatDate = (date) => {
     if (!date) return '—';
@@ -43,6 +45,8 @@ export default function AppointmentsPage() {
     const [appointments, setAppointments] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [lang] = useDashboardLanguage();
+    const t = dashboardStrings[lang].appointments;
 
     useEffect(() => {
         (async () => {
@@ -54,18 +58,19 @@ export default function AppointmentsPage() {
                     router.push('/login');
                     return;
                 }
-                setError('Failed to load appointments.');
+                setError(t.loadError);
             } finally {
                 setLoading(false);
             }
         })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     return (
         <div>
-            <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: -0.5, marginBottom: 4 }}>Appointments</h1>
+            <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: -0.5, marginBottom: 4 }}>{t.heading}</h1>
             <p style={{ fontSize: 13, color: 'var(--fog)', marginBottom: 24 }}>
-                Viewing requests collected by the WhatsApp bot
+                {t.subtitle}
             </p>
 
             {error && <div style={{ color: '#b91c1c', fontSize: 13, marginBottom: 16 }}>{error}</div>}
@@ -75,7 +80,7 @@ export default function AppointmentsPage() {
                     display: 'grid', gridTemplateColumns: '1.6fr 1.8fr 1.6fr 1fr 1.2fr',
                     padding: '12px 20px', background: 'var(--mist)', borderBottom: '1px solid var(--ice)',
                 }}>
-                    {['Lead', 'Property', 'Requested', 'Status', 'Booked'].map((h) => (
+                    {[t.colLead, t.colProperty, t.colRequested, t.colStatus, t.colBooked].map((h) => (
                         <div key={h} style={{ fontSize: 10, fontWeight: 800, color: 'var(--fog)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
                             {h}
                         </div>
@@ -87,9 +92,9 @@ export default function AppointmentsPage() {
                 {!loading && appointments.length === 0 && (
                     <div style={{ padding: '56px 20px', textAlign: 'center' }}>
                         <div style={{ fontSize: 32, marginBottom: 10 }}>📅</div>
-                        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>No appointments yet</div>
+                        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>{t.emptyTitle}</div>
                         <p style={{ fontSize: 13, color: 'var(--fog)' }}>
-                            Viewing requests appear here once the bot books one.
+                            {t.emptyHint}
                         </p>
                     </div>
                 )}
@@ -102,7 +107,7 @@ export default function AppointmentsPage() {
                     }}>
                         <div>
                             <Link href={`/dashboard/leads/${appt.lead_id}`} style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)', textDecoration: 'none' }}>
-                                {appt.lead_name || 'Unknown'}
+                                {appt.lead_name || t.unknownName}
                             </Link>
                             <div style={{ fontSize: 11, color: 'var(--fog)', fontFamily: 'monospace' }}>{appt.lead_phone}</div>
                         </div>

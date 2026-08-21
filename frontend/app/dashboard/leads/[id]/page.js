@@ -5,6 +5,8 @@ import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import api from '../../../../lib/api';
 import { STATUSES as LEAD_STATUSES, STATUS_CONFIG as LEAD_STATUS_CONFIG } from '../../../../lib/statusConfig';
+import { useDashboardLanguage } from '../../../../lib/useDashboardLanguage';
+import { dashboardStrings } from '../../../../lib/dashboardStrings';
 
 const formatDate = (date) => {
     if (!date) return '—';
@@ -43,6 +45,8 @@ export default function LeadDetailPage() {
     const [error, setError] = useState('');
     const [statusSaving, setStatusSaving] = useState(false);
     const [statusError, setStatusError] = useState('');
+    const [lang] = useDashboardLanguage();
+    const t = dashboardStrings[lang].leadDetail;
 
     useEffect(() => {
         fetchLead();
@@ -61,7 +65,7 @@ export default function LeadDetailPage() {
                 router.push('/login');
                 return;
             }
-            setStatusError('Failed to update status.');
+            setStatusError(t.statusUpdateError);
         } finally {
             setStatusSaving(false);
         }
@@ -79,31 +83,31 @@ export default function LeadDetailPage() {
                 return;
             }
             if (err.response?.status === 404) {
-                setError('Lead not found.');
+                setError(t.notFound);
                 return;
             }
-            setError('Failed to load lead.');
+            setError(t.loadError);
         } finally {
             setLoading(false);
         }
     };
 
     if (loading) {
-        return <div style={{ fontSize: 13, color: 'var(--fog)' }}>Loading…</div>;
+        return <div style={{ fontSize: 13, color: 'var(--fog)' }}>{t.loading}</div>;
     }
 
     if (error) {
         return (
             <div>
                 <div style={{ color: '#b91c1c', fontSize: 13, marginBottom: 12 }}>{error}</div>
-                <Link href="/dashboard" style={{ fontSize: 13, color: 'var(--ink)' }}>← Back to leads</Link>
+                <Link href="/dashboard" style={{ fontSize: 13, color: 'var(--ink)' }}>{t.backLink}</Link>
             </div>
         );
     }
 
     return (
         <div>
-            <Link href="/dashboard" style={{ fontSize: 12, color: 'var(--fog)', textDecoration: 'none' }}>← All leads</Link>
+            <Link href="/dashboard" style={{ fontSize: 12, color: 'var(--fog)', textDecoration: 'none' }}>{t.backLink}</Link>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 10, marginBottom: 4, flexWrap: 'wrap' }}>
                 <h1 style={{ fontSize: 26, fontWeight: 800 }}>{lead.name || 'Unknown'}</h1>
@@ -125,29 +129,29 @@ export default function LeadDetailPage() {
                     }}
                 >
                     {LEAD_STATUSES.map((s) => (
-                        <option key={s} value={s}>{LEAD_STATUS_CONFIG[s].label}</option>
+                        <option key={s} value={s}>{LEAD_STATUS_CONFIG[s].label[lang]}</option>
                     ))}
                 </select>
-                {statusSaving && <span style={{ fontSize: 11, color: 'var(--fog)' }}>Saving…</span>}
+                {statusSaving && <span style={{ fontSize: 11, color: 'var(--fog)' }}>{t.saving}</span>}
             </div>
             {statusError && <div style={{ fontSize: 12, color: '#b91c1c', marginBottom: 8 }}>{statusError}</div>}
             <div style={{ fontSize: 13, color: 'var(--fog)', fontFamily: 'monospace', marginBottom: 4 }}>{lead.phone}</div>
             <div style={{ fontSize: 12, color: 'var(--fog)', marginBottom: 28 }}>
-                First contact {formatDate(lead.created_at)} · Last message {formatDate(lead.last_message_at)}
+                {t.firstContact} {formatDate(lead.created_at)} · {t.lastMessage} {formatDate(lead.last_message_at)}
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: 24 }}>
                 {/* Conversation */}
                 <div>
                     <div style={{ fontSize: 11, fontWeight: 800, color: 'var(--fog)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
-                        Conversation
+                        {t.conversation}
                     </div>
                     <div style={{
                         background: '#fff', border: '1px solid var(--ice)', borderRadius: 'var(--r-card)',
                         padding: 20, display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 600, overflowY: 'auto',
                     }}>
                         {conversations.length === 0 && (
-                            <div style={{ fontSize: 13, color: 'var(--fog)' }}>No messages yet.</div>
+                            <div style={{ fontSize: 13, color: 'var(--fog)' }}>{t.noMessages}</div>
                         )}
                         {conversations.map((msg) => (
                             <div
@@ -173,11 +177,11 @@ export default function LeadDetailPage() {
                 {/* Appointments */}
                 <div>
                     <div style={{ fontSize: 11, fontWeight: 800, color: 'var(--fog)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
-                        Appointments
+                        {t.appointments}
                     </div>
                     {appointments.length === 0 && (
                         <div style={{ fontSize: 13, color: 'var(--fog)', background: '#fff', border: '1px solid var(--ice)', borderRadius: 'var(--r-card)', padding: 20 }}>
-                            No viewing requests.
+                            {t.noAppointments}
                         </div>
                     )}
                     {appointments.map((appt) => (
@@ -198,7 +202,7 @@ export default function LeadDetailPage() {
                             </div>
                             <div style={{ fontSize: 12, color: 'var(--ash)', marginBottom: 4 }}>{formatXOF(appt.price)}</div>
                             <div style={{ fontSize: 12, color: 'var(--fog)' }}>
-                                Requested: {appt.requested_datetime_text}
+                                {t.requested} {appt.requested_datetime_text}
                                 {appt.requested_datetime && ` (${formatDate(appt.requested_datetime)})`}
                             </div>
                         </div>

@@ -5,15 +5,16 @@ const pool = require('./index');
 // Never hardcode listing data anywhere else (bot prompts, frontend) — this is
 // the only place listing data is authored; everything else reads from the DB.
 //
-// NOTE — placeholders that must be replaced before this is shown to real users:
-//   - photos: seeded empty ([]). Real Cloudinary photo URLs need to be added
-//     before Step 4 (auto-send listing photos) can be demoed for real.
-//   - agency_contact: seeded with a placeholder string. Replace with OMEGA
-//     INTELLIGENTSIA GROUP's real contact number before production use.
+// NOTE — placeholders still pending:
+//   - photos: real Cloudinary URLs get added per-listing via the dashboard
+//     or backend/scripts/bulk-upload-photos.js, not authored here.
 //   - latitude/longitude: approximate neighbourhood-level demo coordinates,
-//     not exact property addresses.
+//     not exact property addresses. Location/map sending not built yet.
+//
+// agency_contact is intentionally the SAME static value on every listing —
+// client decision: no per-agency numbers, always show the EXCELIA office.
 
-const AGENCY_CONTACT_PLACEHOLDER = 'OMEGA INTELLIGENTSIA GROUP — PLACEHOLDER CONTACT (replace before production)';
+const EXCELIA_OFFICE_CONTACT = '+228 91062626 — EXCELIA office';
 
 const listings = [
     {
@@ -119,7 +120,7 @@ const seed = async () => {
                     [],
                     listing.latitude,
                     listing.longitude,
-                    AGENCY_CONTACT_PLACEHOLDER,
+                    EXCELIA_OFFICE_CONTACT,
                 ]
             );
         }
