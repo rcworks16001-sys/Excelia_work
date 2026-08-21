@@ -9,6 +9,15 @@ const PROPERTY_COLUMNS = `
 
 const PRICE_TOLERANCE = 1.1; // 10% tolerance on price_max, per CLAUDE.md search rules
 
+// The ONE list of valid property types — matches the DB CHECK constraint on
+// properties.type in migrate.js.
+const VALID_PROPERTY_TYPES = ['chambre_salon', 'appartement', 'villa', 'terrain', 'mini_villa', 'appartement_meuble'];
+
+// Client decision: no per-agency contact numbers — every listing always
+// shows the single EXCELIA office number (same value migrate.js backfills
+// onto existing rows). A newly-created listing gets it automatically.
+const EXCELIA_OFFICE_CONTACT = '+228 91062626 — EXCELIA office';
+
 // ── searchProperties(filters) ──
 // The ONE property search function. Both the WhatsApp bot and the (future)
 // dashboard call this — never duplicate this query elsewhere.
@@ -252,4 +261,81 @@ const deleteVideo = async (req, res) => {
     }
 };
 
-module.exports = { searchProperties, search, getPropertyById, list, uploadPhoto, deletePhoto, uploadVideo, deleteVideo, getKnownLocations };
+// ── create(req, res) ──
+// New listing from the dashboard's "Add property" form. agency_contact is
+// never taken from the request — always the single static office number,
+// matching the existing client decision (see EXCELIA_OFFICE_CONTACT above).
+const create = async (req, res) => {
+    const { city, neighbourhood, type, price, bedrooms, description } = req.body || {};
+
+    if (typeof city !== 'string' || !city.trim()) {
+        return res.status(400).json({ error: 'city is required' });
+    }
+    if (typeof neighbourhood !== 'string' || !neighbourhood.trim()) {
+        return res.status(400).json({ error: 'neighbourhood is required' });
+    }
+    if (!VALID_PROPERTY_TYPES.includes(type)) {
+        return res.status(400).json({ error: `type must be one of: ${VALID_PROPERTY_TYPES.join(', ')}` });
+    }
+    const priceNum = Number(price);
+    if (!Number.isFinite(priceNum) || priceNum <= 0 || !Number.isInteger(priceNum)) {
+        return res.status(400).json({ error: 'price must be a positive integer' });
+    }
+    let bedroomsNum = null;
+    if (bedrooms !== undefined && bedrooms !== null && bedrooms !== '') {
+        bedroomsNum = Number(bedrooms);
+        if (!Number.isInteger(bedroomsNum) || bedroomsNum < 0) {
+            return res.status(400).json({ error: 'bedrooms must be a non-negative integer' });
+        }
+    }
+
+    try {
+        const result = await pool.query(
+            `INSERT INTO properties (city, neighbourhood, type, price, bedrooms, description, photos, agency_contact)
+             VALUES ($1, $2, $3, $4, $5, $6, '{}', $7)
+             RETURNING ${PROPERTY_COLUMNS}`,
+            [city.trim(), neighbourhood.trim(), type, priceNum, bedroomsNum, description || null, EXCELIA_OFFICE_CONTACT]
+        );
+        res.status(201).json({ property: result.rows[0] });
+    } catch (error) {
+        console.error('Error creating property:', error);
+        res.status(500).json({ error: 'Failed to create property' });
+    }
+};
+
+// ── remove(req, res) ──
+// Blocks deletion if the listing has any appointments booked against it —
+// appointments.property_id is ON DELETE CASCADE, so an unguarded delete
+// would silently wipe that booking history. The admin has to clear/reassign
+// those appointments first (or we'd need an explicit force flag, which we
+// deliberately don't offer here).
+const remove = async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+        return res.status(400).json({ error: 'Invalid property id' });
+    }
+
+    try {
+        const appointmentCheck = await pool.query('SELECT COUNT(*) FROM appointments WHERE property_id = $1', [id]);
+        const appointmentCount = parseInt(appointmentCheck.rows[0].count, 10);
+        if (appointmentCount > 0) {
+            return res.status(409).json({
+                error: `Cannot delete: ${appointmentCount} appointment(s) are booked against this property.`,
+            });
+        }
+
+        const result = await pool.query('DELETE FROM properties WHERE id = $1 RETURNING id', [id]);
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Property not found' });
+        }
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting property:', error);
+        res.status(500).json({ error: 'Failed to delete property' });
+    }
+};
+
+module.exports = {
+    searchProperties, search, getPropertyById, list, uploadPhoto, deletePhoto,
+    uploadVideo, deleteVideo, getKnownLocations, create, remove, VALID_PROPERTY_TYPES,
+};

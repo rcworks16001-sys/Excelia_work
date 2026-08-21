@@ -12,13 +12,15 @@ const formatXOF = (amount) => {
     return `${Math.abs(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} F CFA`;
 };
 
-function PropertyCard({ property, onPhotosChanged, onVideoChanged, t, lang }) {
+function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, onEnlarge, t, lang }) {
     const fileInputRef = useRef(null);
     const videoInputRef = useRef(null);
     const [uploading, setUploading] = useState(false);
     const [uploadError, setUploadError] = useState('');
     const [videoUploading, setVideoUploading] = useState(false);
     const [videoError, setVideoError] = useState('');
+    const [deleting, setDeleting] = useState(false);
+    const [deleteError, setDeleteError] = useState('');
     const photos = property.photos || [];
     const hasPhoto = photos.length > 0;
     // description is authored in French; description_en is the cached one-time
@@ -26,18 +28,23 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, t, lang }) {
     // yet (run `npm run backfill-translations` in backend/ to fill new ones).
     const description = lang === 'en' ? (property.description_en || property.description) : property.description;
 
+    // Multiple files: upload one at a time to the existing single-file
+    // endpoint (no backend change needed), updating the gallery after each
+    // one so progress is visible rather than waiting for the whole batch.
     const handleFileChange = async (e) => {
-        const file = e.target.files?.[0];
-        e.target.value = ''; // allow picking the same file again later
-        if (!file) return;
+        const files = Array.from(e.target.files || []);
+        e.target.value = ''; // allow picking the same file(s) again later
+        if (files.length === 0) return;
 
         setUploadError('');
         setUploading(true);
         try {
-            const formData = new FormData();
-            formData.append('photo', file);
-            const response = await api.post(`/properties/${property.id}/photos`, formData);
-            onPhotosChanged(property.id, response.data.photos);
+            for (const file of files) {
+                const formData = new FormData();
+                formData.append('photo', file);
+                const response = await api.post(`/properties/${property.id}/photos`, formData);
+                onPhotosChanged(property.id, response.data.photos);
+            }
         } catch (err) {
             setUploadError(t.uploadError);
         } finally {
@@ -82,13 +89,33 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, t, lang }) {
         }
     };
 
+    const handleDeleteProperty = async () => {
+        if (!window.confirm(t.deletePropertyConfirm)) return;
+        setDeleteError('');
+        setDeleting(true);
+        try {
+            await api.delete(`/properties/${property.id}`);
+            onDeleted(property.id);
+        } catch (err) {
+            // The backend blocks deletion (409) when appointments reference
+            // this listing, with a message explaining why — show that
+            // directly rather than a generic failure.
+            setDeleteError(err.response?.data?.error || t.deletePropertyError);
+            setDeleting(false);
+        }
+    };
+
     return (
         <div style={{ background: '#fff', border: '1px solid var(--ice)', borderRadius: 'var(--r-card)', overflow: 'hidden' }}>
             {/* Cover photo, or a clear placeholder if none uploaded yet. */}
-            <div style={{
-                height: 140, background: 'var(--mist)', display: 'flex',
-                alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 4, position: 'relative',
-            }}>
+            <div
+                onClick={() => hasPhoto && onEnlarge('image', photos[0])}
+                style={{
+                    height: 140, background: 'var(--mist)', display: 'flex',
+                    alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 4, position: 'relative',
+                    cursor: hasPhoto ? 'zoom-in' : 'default',
+                }}
+            >
                 {hasPhoto ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img src={photos[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -115,13 +142,18 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, t, lang }) {
                     </p>
                 )}
 
-                {/* Photo thumbnails — each removable */}
+                {/* Photo thumbnails — click to enlarge, × to remove */}
                 {hasPhoto && (
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
                         {photos.map((url) => (
                             <div key={url} style={{ position: 'relative', width: 44, height: 44 }}>
                                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                                <img src={url} alt="" style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--ice)' }} />
+                                <img
+                                    src={url}
+                                    alt=""
+                                    onClick={() => onEnlarge('image', url)}
+                                    style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--ice)', cursor: 'zoom-in' }}
+                                />
                                 <button
                                     onClick={() => handleDeletePhoto(url)}
                                     title="Remove photo"
@@ -142,6 +174,7 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, t, lang }) {
                     ref={fileInputRef}
                     type="file"
                     accept="image/*"
+                    multiple
                     onChange={handleFileChange}
                     style={{ display: 'none' }}
                 />
@@ -158,14 +191,25 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, t, lang }) {
                 </button>
                 {uploadError && <div style={{ fontSize: 11, color: '#b91c1c', marginBottom: 8 }}>{uploadError}</div>}
 
-                {/* Walkthrough video — a single value, not a gallery like photos */}
+                {/* Walkthrough video — a small thumbnail like the photos, not a
+                    full-width player; click to enlarge and play. */}
                 {property.video_url && (
                     <div style={{ marginBottom: 10 }}>
-                        <video
-                            src={property.video_url}
-                            controls
-                            style={{ width: '100%', borderRadius: 6, border: '1px solid var(--ice)', display: 'block' }}
-                        />
+                        <div
+                            onClick={() => onEnlarge('video', property.video_url)}
+                            style={{
+                                position: 'relative', width: 44, height: 44, borderRadius: 6,
+                                border: '1px solid var(--ice)', overflow: 'hidden', cursor: 'zoom-in', background: '#000',
+                            }}
+                        >
+                            <video src={property.video_url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} muted />
+                            <div style={{
+                                position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                color: '#fff', fontSize: 14, textShadow: '0 1px 3px rgba(0,0,0,0.6)',
+                            }}>
+                                ▶
+                            </div>
+                        </div>
                         <button
                             onClick={handleDeleteVideo}
                             style={{
@@ -198,9 +242,23 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, t, lang }) {
                 </button>
                 {videoError && <div style={{ fontSize: 11, color: '#b91c1c', marginBottom: 8 }}>{videoError}</div>}
 
-                <div style={{ fontSize: 11, color: 'var(--fog)', borderTop: '1px solid var(--ice)', paddingTop: 8 }}>
+                <div style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    fontSize: 11, color: 'var(--fog)', borderTop: '1px solid var(--ice)', paddingTop: 8,
+                }}>
                     {property.agency_contact}
+                    <button
+                        onClick={handleDeleteProperty}
+                        disabled={deleting}
+                        style={{
+                            fontSize: 11, fontWeight: 600, color: '#b91c1c', background: 'none', border: 'none',
+                            cursor: deleting ? 'default' : 'pointer', padding: 0,
+                        }}
+                    >
+                        {t.deleteProperty}
+                    </button>
                 </div>
+                {deleteError && <div style={{ fontSize: 11, color: '#b91c1c', marginTop: 6 }}>{deleteError}</div>}
             </div>
         </div>
     );
@@ -219,6 +277,58 @@ function SkeletonCard() {
     );
 }
 
+// Fullscreen overlay for an enlarged photo or video. Closes on backdrop
+// click, × button, or Escape.
+function Lightbox({ media, onClose }) {
+    useEffect(() => {
+        const onKeyDown = (e) => { if (e.key === 'Escape') onClose(); };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [onClose]);
+
+    if (!media) return null;
+
+    return (
+        <div
+            onClick={onClose}
+            style={{
+                position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 1000,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+            }}
+        >
+            <button
+                onClick={onClose}
+                style={{
+                    position: 'absolute', top: 20, right: 24, width: 36, height: 36, borderRadius: '50%',
+                    border: 'none', background: 'rgba(255,255,255,0.15)', color: '#fff', fontSize: 18,
+                    cursor: 'pointer', lineHeight: '36px', textAlign: 'center',
+                }}
+            >
+                ×
+            </button>
+            {media.type === 'image' ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                    src={media.url}
+                    alt=""
+                    onClick={(e) => e.stopPropagation()}
+                    style={{ maxWidth: '90vw', maxHeight: '90vh', objectFit: 'contain', borderRadius: 8 }}
+                />
+            ) : (
+                <video
+                    src={media.url}
+                    controls
+                    autoPlay
+                    onClick={(e) => e.stopPropagation()}
+                    style={{ maxWidth: '90vw', maxHeight: '90vh', borderRadius: 8 }}
+                />
+            )}
+        </div>
+    );
+}
+
+const ADD_FORM_DEFAULTS = { city: '', neighbourhood: '', type: '', price: '', bedrooms: '', description: '' };
+
 export default function PropertiesPage() {
     const router = useRouter();
     const [properties, setProperties] = useState([]);
@@ -226,6 +336,11 @@ export default function PropertiesPage() {
     const [error, setError] = useState('');
     const [typeFilter, setTypeFilter] = useState('all');
     const [search, setSearch] = useState('');
+    const [enlarged, setEnlarged] = useState(null); // { type: 'image'|'video', url } | null
+    const [showAddForm, setShowAddForm] = useState(false);
+    const [addForm, setAddForm] = useState(ADD_FORM_DEFAULTS);
+    const [addSaving, setAddSaving] = useState(false);
+    const [addError, setAddError] = useState('');
     const [lang] = useDashboardLanguage();
     const t = dashboardStrings[lang].properties;
 
@@ -255,23 +370,126 @@ export default function PropertiesPage() {
         setProperties((prev) => prev.map((p) => (p.id === propertyId ? { ...p, video_url: newVideoUrl } : p)));
     };
 
+    const handlePropertyDeleted = (propertyId) => {
+        setProperties((prev) => prev.filter((p) => p.id !== propertyId));
+    };
+
+    const handleAddSubmit = async (e) => {
+        e.preventDefault();
+        setAddError('');
+        setAddSaving(true);
+        try {
+            const response = await api.post('/properties', {
+                city: addForm.city,
+                neighbourhood: addForm.neighbourhood,
+                type: addForm.type,
+                price: addForm.price ? Number(addForm.price) : undefined,
+                bedrooms: addForm.bedrooms === '' ? null : Number(addForm.bedrooms),
+                description: addForm.description || null,
+            });
+            setProperties((prev) => [response.data.property, ...prev]);
+            setAddForm(ADD_FORM_DEFAULTS);
+            setShowAddForm(false);
+        } catch (err) {
+            if (err.response?.status === 401) {
+                router.push('/login');
+                return;
+            }
+            setAddError(err.response?.data?.error || t.addError);
+        } finally {
+            setAddSaving(false);
+        }
+    };
+
     const types = ['all', ...Object.keys(t.typeLabels)];
     const filtered = properties.filter((p) => {
         if (typeFilter !== 'all' && p.type !== typeFilter) return false;
         if (!search) return true;
-        const q = search.toLowerCase();
-        return (p.neighbourhood || '').toLowerCase().includes(q)
-            || (p.city || '').toLowerCase().includes(q)
-            || (p.description || '').toLowerCase().includes(q)
-            || (p.description_en || '').toLowerCase().includes(q);
+        // Match every word in the query against the combined fields, not the
+        // whole query against one field — a copy-pasted "Neighbourhood, City"
+        // string (exactly as the card displays it) otherwise never matches,
+        // since no single field contains that full comma-separated string.
+        const haystack = `${p.neighbourhood || ''} ${p.city || ''} ${p.description || ''} ${p.description_en || ''}`.toLowerCase();
+        const words = search.toLowerCase().replace(/[,.;]/g, ' ').split(/\s+/).filter(Boolean);
+        return words.every((w) => haystack.includes(w));
     });
 
     return (
         <div>
-            <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: -0.5, marginBottom: 4 }}>{t.heading}</h1>
-            <p style={{ fontSize: 13, color: 'var(--fog)', marginBottom: 20 }}>
-                {loading ? t.loading : t.listingsCount(properties.length)}
-            </p>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4, flexWrap: 'wrap', gap: 10 }}>
+                <div>
+                    <h1 style={{ fontSize: 28, fontWeight: 800, letterSpacing: -0.5, marginBottom: 4 }}>{t.heading}</h1>
+                    <p style={{ fontSize: 13, color: 'var(--fog)' }}>
+                        {loading ? t.loading : t.listingsCount(properties.length)}
+                    </p>
+                </div>
+                <button
+                    onClick={() => setShowAddForm((v) => !v)}
+                    style={{
+                        fontSize: 13, fontWeight: 700, padding: '9px 16px', borderRadius: 'var(--r-btn)',
+                        border: 'none', background: 'var(--ink)', color: '#fff', cursor: 'pointer',
+                    }}
+                >
+                    {t.addProperty}
+                </button>
+            </div>
+
+            {showAddForm && (
+                <form
+                    onSubmit={handleAddSubmit}
+                    style={{
+                        background: '#fff', border: '1px solid var(--ice)', borderRadius: 'var(--r-card)',
+                        padding: 16, marginBottom: 20, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10,
+                    }}
+                >
+                    <div>
+                        <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--ash)', marginBottom: 4 }}>{t.addFieldCity}</label>
+                        <input required value={addForm.city} onChange={(e) => setAddForm((f) => ({ ...f, city: e.target.value }))}
+                            style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)', outline: 'none', color: 'var(--ink)' }} />
+                    </div>
+                    <div>
+                        <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--ash)', marginBottom: 4 }}>{t.addFieldNeighbourhood}</label>
+                        <input required value={addForm.neighbourhood} onChange={(e) => setAddForm((f) => ({ ...f, neighbourhood: e.target.value }))}
+                            style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)', outline: 'none', color: 'var(--ink)' }} />
+                    </div>
+                    <div>
+                        <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--ash)', marginBottom: 4 }}>{t.addFieldType}</label>
+                        <select required value={addForm.type} onChange={(e) => setAddForm((f) => ({ ...f, type: e.target.value }))}
+                            style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)', outline: 'none', color: 'var(--ink)' }}>
+                            <option value="" disabled>—</option>
+                            {Object.keys(t.typeLabels).map((type) => (
+                                <option key={type} value={type}>{t.typeLabels[type]}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div>
+                        <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--ash)', marginBottom: 4 }}>{t.addFieldPrice}</label>
+                        <input required type="number" min="1" value={addForm.price} onChange={(e) => setAddForm((f) => ({ ...f, price: e.target.value }))}
+                            style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)', outline: 'none', color: 'var(--ink)' }} />
+                    </div>
+                    <div>
+                        <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--ash)', marginBottom: 4 }}>{t.addFieldBedrooms}</label>
+                        <input type="number" min="0" value={addForm.bedrooms} onChange={(e) => setAddForm((f) => ({ ...f, bedrooms: e.target.value }))}
+                            style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)', outline: 'none', color: 'var(--ink)' }} />
+                    </div>
+                    <div style={{ gridColumn: '1 / -1' }}>
+                        <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--ash)', marginBottom: 4 }}>{t.addFieldDescription}</label>
+                        <textarea rows={2} value={addForm.description} onChange={(e) => setAddForm((f) => ({ ...f, description: e.target.value }))}
+                            style={{ width: '100%', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)', outline: 'none', resize: 'vertical', color: 'var(--ink)' }} />
+                    </div>
+                    <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <button type="submit" disabled={addSaving}
+                            style={{ fontSize: 13, fontWeight: 700, padding: '8px 16px', borderRadius: 'var(--r-btn)', border: 'none', background: 'var(--ink)', color: '#fff', cursor: addSaving ? 'default' : 'pointer' }}>
+                            {addSaving ? t.addSaving : t.addSubmit}
+                        </button>
+                        <button type="button" onClick={() => { setShowAddForm(false); setAddForm(ADD_FORM_DEFAULTS); setAddError(''); }}
+                            style={{ fontSize: 13, fontWeight: 600, padding: '8px 16px', borderRadius: 'var(--r-btn)', border: '1px solid var(--ice)', background: '#fff', color: 'var(--ash)', cursor: 'pointer' }}>
+                            {t.addCancel}
+                        </button>
+                        {addError && <span style={{ fontSize: 12, color: '#b91c1c' }}>{addError}</span>}
+                    </div>
+                </form>
+            )}
 
             <div style={{ display: 'flex', gap: 3, background: '#fff', border: '1px solid var(--ice)', borderRadius: 12, padding: 4, marginBottom: 20, flexWrap: 'wrap', width: 'fit-content' }}>
                 {types.map((type) => (
@@ -305,7 +523,16 @@ export default function PropertiesPage() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 16 }}>
                 {loading && [1, 2, 3, 4, 5, 6].map((i) => <SkeletonCard key={i} />)}
                 {!loading && filtered.map((property) => (
-                    <PropertyCard key={property.id} property={property} onPhotosChanged={handlePhotosChanged} onVideoChanged={handleVideoChanged} t={t} lang={lang} />
+                    <PropertyCard
+                        key={property.id}
+                        property={property}
+                        onPhotosChanged={handlePhotosChanged}
+                        onVideoChanged={handleVideoChanged}
+                        onDeleted={handlePropertyDeleted}
+                        onEnlarge={(type, url) => setEnlarged({ type, url })}
+                        t={t}
+                        lang={lang}
+                    />
                 ))}
             </div>
 
@@ -315,6 +542,8 @@ export default function PropertiesPage() {
                     <div style={{ fontSize: 16, fontWeight: 700 }}>{t.emptyFilter}</div>
                 </div>
             )}
+
+            <Lightbox media={enlarged} onClose={() => setEnlarged(null)} />
         </div>
     );
 }

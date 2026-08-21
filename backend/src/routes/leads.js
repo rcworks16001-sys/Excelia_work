@@ -15,4 +15,7 @@ router.patch('/:id/status', authenticateAdmin, leadController.updateStatus);
 // POST /api/leads/:id/reply — send a plain WhatsApp text reply, body: { message }
 router.post('/:id/reply', authenticateAdmin, leadController.sendReply);
 
+// PATCH /api/leads/:id/notes — update admin notes, body: { notes }
+router.patch('/:id/notes', authenticateAdmin, leadController.updateNotes);
+
 module.exports = router;

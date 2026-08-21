@@ -260,7 +260,7 @@ The Claude extraction prompt is built dynamically per call (`buildNluSystemPromp
 - Never forget to add a new route to `backend/index.js`.
 - Never forget to export a new function in `module.exports`.
 - Never let the dashboard work without backend auth, even for the demo.
-- Never send a user's WhatsApp number to the frontend. Mask it or omit it in API responses.
+- Phone numbers ARE sent to the frontend unmasked (Leads list, Lead Detail, Appointments list) — client decision, overriding the original masking rule: the admin needs the real number to actually call/WhatsApp a lead back. `maskPhone()` still exists in `utils/format.js` but nothing calls it anymore; trivial to reinstate if this changes.
 
 ---
 

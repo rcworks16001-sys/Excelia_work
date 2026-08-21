@@ -30,6 +30,7 @@ export default function LeadsOverviewPage() {
     const [error, setError] = useState('');
     const [search, setSearch] = useState('');
     const [statusFilter, setStatusFilter] = useState('all');
+    const [statusUpdateError, setStatusUpdateError] = useState('');
     const [lang] = useDashboardLanguage();
     const t = dashboardStrings[lang].leadsOverview;
 
@@ -52,11 +53,31 @@ export default function LeadsOverviewPage() {
         }
     };
 
+    const handleStatusChange = async (leadId, newStatus) => {
+        const previous = leads.find((l) => l.id === leadId)?.status;
+        setStatusUpdateError('');
+        setLeads((prev) => prev.map((l) => (l.id === leadId ? { ...l, status: newStatus } : l))); // optimistic
+        try {
+            await api.patch(`/leads/${leadId}/status`, { status: newStatus });
+        } catch (err) {
+            setLeads((prev) => prev.map((l) => (l.id === leadId ? { ...l, status: previous } : l))); // revert
+            if (err.response?.status === 401) {
+                router.push('/login');
+                return;
+            }
+            setStatusUpdateError(t.statusUpdateError);
+        }
+    };
+
     const filteredLeads = leads.filter((lead) => {
         if (statusFilter !== 'all' && lead.status !== statusFilter) return false;
         if (!search) return true;
-        const q = search.toLowerCase();
-        return (lead.name || '').toLowerCase().includes(q) || lead.phone.includes(q);
+        // Match every word in the query against the combined name+phone, not
+        // the whole query against one field — otherwise a copy-pasted "Name,
+        // phone"-style string never matches (see the same fix on Properties).
+        const haystack = `${lead.name || ''} ${lead.phone || ''}`.toLowerCase();
+        const words = search.toLowerCase().replace(/[,.;]/g, ' ').split(/\s+/).filter(Boolean);
+        return words.every((w) => haystack.includes(w));
     });
 
     const now = Date.now();
@@ -130,6 +151,7 @@ export default function LeadsOverviewPage() {
             />
 
             {error && <div style={{ color: '#b91c1c', fontSize: 13, marginBottom: 16 }}>{error}</div>}
+            {statusUpdateError && <div style={{ color: '#b91c1c', fontSize: 13, marginBottom: 16 }}>{statusUpdateError}</div>}
 
             <div style={{ background: '#fff', border: '1px solid var(--ice)', borderRadius: 'var(--r-card)', overflow: 'hidden' }}>
                 <div style={{
@@ -170,13 +192,21 @@ export default function LeadsOverviewPage() {
                         <span className="badge" style={{ background: 'var(--mist)', color: 'var(--ash)', width: 'fit-content' }}>
                             {LANGUAGE_LABEL[lead.language] || lead.language}
                         </span>
-                        <span className="badge" style={{
-                            background: STATUS_CONFIG[lead.status]?.bg || 'var(--mist)',
-                            color: STATUS_CONFIG[lead.status]?.color || 'var(--ash)',
-                            width: 'fit-content',
-                        }}>
-                            {STATUS_CONFIG[lead.status]?.label[lang] || lead.status}
-                        </span>
+                        <select
+                            value={lead.status}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => handleStatusChange(lead.id, e.target.value)}
+                            className="badge"
+                            style={{
+                                background: STATUS_CONFIG[lead.status]?.bg || 'var(--mist)',
+                                color: STATUS_CONFIG[lead.status]?.color || 'var(--ash)',
+                                width: 'fit-content', border: 'none', cursor: 'pointer', fontWeight: 700,
+                            }}
+                        >
+                            {STATUSES.map((s) => (
+                                <option key={s} value={s}>{STATUS_CONFIG[s].label[lang]}</option>
+                            ))}
+                        </select>
                         <div style={{ fontSize: 12, color: 'var(--fog)' }}>{formatTimeAgo(lead.created_at, lang)}</div>
                         <div style={{ fontSize: 12, color: 'var(--fog)' }}>{formatTimeAgo(lead.last_message_at, lang)}</div>
                     </div>

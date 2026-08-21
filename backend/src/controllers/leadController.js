@@ -1,5 +1,4 @@
 const pool = require('../db/index');
-const { maskPhone } = require('../utils/format');
 
 // ── getOrCreateLead(phone, name, language) ──
 // The ONE place a lead is looked up or created. Returns
@@ -102,10 +101,10 @@ const clearPendingAction = async (leadId) => {
 };
 
 // ── Dashboard read endpoints ──
-// Never SELECT * — only the columns the dashboard needs. Phone is always
-// masked before it leaves the backend (CLAUDE.md: never send a user's
-// WhatsApp number to the frontend).
-const LEAD_COLUMNS = 'id, phone, name, language, status, created_at, last_message_at';
+// Never SELECT * — only the columns the dashboard needs. Phone is sent
+// UNMASKED (client decision, overriding the earlier masking rule — the admin
+// needs the real number to actually call leads back; see CLAUDE.md).
+const LEAD_COLUMNS = 'id, phone, name, language, status, notes, created_at, last_message_at';
 
 // The ONE list of valid pipeline stages — backend enforcement lives here;
 // the frontend mirrors these same 6 literal values in its status dropdown
@@ -115,7 +114,7 @@ const VALID_STATUSES = ['new', 'contacted', 'qualified', 'site_visit', 'converte
 
 const listLeads = async () => {
     const result = await pool.query(`SELECT ${LEAD_COLUMNS} FROM leads ORDER BY last_message_at DESC`);
-    return result.rows.map((row) => ({ ...row, phone: maskPhone(row.phone) }));
+    return result.rows;
 };
 
 const list = async (req, res) => {
@@ -132,7 +131,7 @@ const getLeadWithConversation = async (id) => {
     const leadResult = await pool.query(`SELECT ${LEAD_COLUMNS} FROM leads WHERE id = $1`, [id]);
     if (leadResult.rows.length === 0) return null;
 
-    const lead = { ...leadResult.rows[0], phone: maskPhone(leadResult.rows[0].phone) };
+    const lead = leadResult.rows[0];
 
     const conversations = await pool.query(
         'SELECT id, sender, message, created_at FROM conversations WHERE lead_id = $1 ORDER BY created_at ASC',
@@ -204,6 +203,41 @@ const updateStatus = async (req, res) => {
     }
 };
 
+// ── updateLeadNotes(id, notes) ──
+// The ONE place a lead's admin notes get written. Separate endpoint from
+// status, mirroring that same thin pattern — notes are free text, not a
+// constrained enum, so there's no VALID_* list to check against.
+const updateLeadNotes = async (id, notes) => {
+    const result = await pool.query(
+        'UPDATE leads SET notes = $1 WHERE id = $2 RETURNING id, notes',
+        [notes, id]
+    );
+    return result.rows[0] || null;
+};
+
+const updateNotes = async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+        return res.status(400).json({ error: 'Invalid lead id' });
+    }
+
+    const { notes } = req.body || {};
+    if (notes !== null && typeof notes !== 'string') {
+        return res.status(400).json({ error: 'notes must be a string or null' });
+    }
+
+    try {
+        const updated = await updateLeadNotes(id, notes);
+        if (!updated) {
+            return res.status(404).json({ error: 'Lead not found' });
+        }
+        res.json({ lead: updated });
+    } catch (error) {
+        console.error('Error updating lead notes:', error);
+        res.status(500).json({ error: 'Failed to update notes' });
+    }
+};
+
 // ── sendReply(id, message) ──
 // Admin-typed WhatsApp reply, sent from the dashboard's lead detail page.
 // Looks up the RAW (unmasked) phone directly — this is the one place that's
@@ -251,6 +285,7 @@ module.exports = {
     list,
     getById,
     updateStatus,
+    updateNotes,
     sendReply,
     VALID_STATUSES,
 };

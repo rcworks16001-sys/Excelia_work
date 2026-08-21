@@ -1,5 +1,8 @@
 const pool = require('../db/index');
-const { maskPhone } = require('../utils/format');
+
+// The ONE list of valid appointment statuses — matches the DB CHECK
+// constraint on appointments.status in migrate.js.
+const VALID_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'cancelled', 'completed'];
 
 // ── createAppointment ──
 // The ONE place an appointment gets created. Used by the bot now; the
@@ -42,12 +45,46 @@ const list = async (req, res) => {
             JOIN properties p ON p.id = a.property_id
             ORDER BY a.created_at DESC
         `);
-        const appointments = result.rows.map((row) => ({ ...row, lead_phone: maskPhone(row.lead_phone) }));
-        res.json({ appointments });
+        // lead_phone sent unmasked — client decision, admin needs the real
+        // number to call leads back (see CLAUDE.md).
+        res.json({ appointments: result.rows });
     } catch (error) {
         console.error('Error listing appointments:', error);
         res.status(500).json({ error: 'Failed to list appointments' });
     }
 };
 
-module.exports = { createAppointment, list };
+// ── updateAppointmentStatus(id, status) ──
+// The ONE place an appointment's status is written.
+const updateAppointmentStatus = async (id, status) => {
+    const result = await pool.query(
+        'UPDATE appointments SET status = $1 WHERE id = $2 RETURNING id, status',
+        [status, id]
+    );
+    return result.rows[0] || null;
+};
+
+const updateStatus = async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+        return res.status(400).json({ error: 'Invalid appointment id' });
+    }
+
+    const { status } = req.body || {};
+    if (!VALID_APPOINTMENT_STATUSES.includes(status)) {
+        return res.status(400).json({ error: `status must be one of: ${VALID_APPOINTMENT_STATUSES.join(', ')}` });
+    }
+
+    try {
+        const updated = await updateAppointmentStatus(id, status);
+        if (!updated) {
+            return res.status(404).json({ error: 'Appointment not found' });
+        }
+        res.json({ appointment: updated });
+    } catch (error) {
+        console.error('Error updating appointment status:', error);
+        res.status(500).json({ error: 'Failed to update status' });
+    }
+};
+
+module.exports = { createAppointment, list, updateStatus, VALID_APPOINTMENT_STATUSES };

@@ -14,6 +14,12 @@ const uploadVideo = multer({ storage: multer.memoryStorage(), limits: { fileSize
 // GET /api/properties — full listing, for the dashboard's properties page
 router.get('/', authenticateAdmin, propertyController.list);
 
+// POST /api/properties — create a new listing, body: { city, neighbourhood, type, price, bedrooms?, description? }
+router.post('/', authenticateAdmin, propertyController.create);
+
+// DELETE /api/properties/:id — remove a listing (blocked if it has appointments)
+router.delete('/:id', authenticateAdmin, propertyController.remove);
+
 // GET /api/properties/search?city=&neighbourhood=&type=&bedrooms=&price_max=
 router.get('/search', authenticateAdmin, propertyController.search);
 

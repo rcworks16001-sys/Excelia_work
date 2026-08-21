@@ -131,6 +131,11 @@ const runMigrations = async () => {
             'new', 'contacted', 'qualified', 'site_visit', 'converted', 'lost'
         ));`);
 
+        // Free-text admin notes about a lead — separate from `conversations`
+        // (the actual WhatsApp transcript). Auto-saved from the dashboard's
+        // lead detail page, never touched by the bot.
+        await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS notes TEXT;`);
+
         // Client decision: no per-agency contact numbers — every listing
         // always shows the single EXCELIA office number. Updating seed.js
         // alone wouldn't touch already-seeded live rows (seed.js skips

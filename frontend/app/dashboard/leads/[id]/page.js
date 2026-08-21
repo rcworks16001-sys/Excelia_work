@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import api from '../../../../lib/api';
@@ -72,11 +72,32 @@ export default function LeadDetailPage() {
     const [replyText, setReplyText] = useState('');
     const [sending, setSending] = useState(false);
     const [sendError, setSendError] = useState('');
+    const [notesDraft, setNotesDraft] = useState('');
+    const [notesStatus, setNotesStatus] = useState('idle'); // idle | saving | saved | error
     const [lang] = useDashboardLanguage();
     const t = dashboardStrings[lang].leadDetail;
+    const notesTimerRef = useRef(null);
+    const notesLoadedRef = useRef(false); // don't overwrite the textarea once the admin starts editing
 
     useEffect(() => {
+        notesLoadedRef.current = false;
         fetchLead();
+        return () => {
+            if (notesTimerRef.current) clearTimeout(notesTimerRef.current);
+        };
+    }, [params.id]);
+
+    // Real-time-ish conversation updates: poll every 5s while the tab is
+    // visible, instead of forcing a manual refresh after every WhatsApp
+    // message. No WebSocket/infra exists in this stack, so polling is the
+    // pragmatic fit. Paused when hidden to avoid wasted requests.
+    useEffect(() => {
+        const interval = setInterval(() => {
+            if (document.visibilityState === 'visible') {
+                fetchLead({ silent: true });
+            }
+        }, 5000);
+        return () => clearInterval(interval);
     }, [params.id]);
 
     const handleStatusChange = async (newStatus) => {
@@ -124,13 +145,27 @@ export default function LeadDetailPage() {
         }
     };
 
-    const fetchLead = async () => {
+    const fetchLead = async ({ silent = false } = {}) => {
         try {
             const response = await api.get(`/leads/${params.id}`);
             setLead(response.data.lead);
-            setConversations(response.data.conversations);
+            // Admin replies (sendReply) aren't persisted server-side by design
+            // (see handleSendReply), so a poll refetch must not drop them —
+            // re-append whatever local-only messages are still in state after
+            // the server's authoritative list.
+            setConversations((prev) => {
+                const localOnly = prev.filter((m) => String(m.id).startsWith('local-'));
+                return [...response.data.conversations, ...localOnly];
+            });
             setAppointments(response.data.appointments);
+            // Only seed the notes textarea once — a silent poll must never
+            // clobber whatever the admin is currently typing.
+            if (!notesLoadedRef.current) {
+                setNotesDraft(response.data.lead.notes || '');
+                notesLoadedRef.current = true;
+            }
         } catch (err) {
+            if (silent) return; // don't disrupt the page over a background poll hiccup
             if (err.response?.status === 401) {
                 router.push('/login');
                 return;
@@ -141,8 +176,27 @@ export default function LeadDetailPage() {
             }
             setError(t.loadError);
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
+    };
+
+    const handleNotesChange = (value) => {
+        setNotesDraft(value);
+        setNotesStatus('idle');
+        if (notesTimerRef.current) clearTimeout(notesTimerRef.current);
+        notesTimerRef.current = setTimeout(async () => {
+            setNotesStatus('saving');
+            try {
+                await api.patch(`/leads/${params.id}/notes`, { notes: value });
+                setNotesStatus('saved');
+            } catch (err) {
+                if (err.response?.status === 401) {
+                    router.push('/login');
+                    return;
+                }
+                setNotesStatus('error');
+            }
+        }, 800);
     };
 
     if (loading) {
@@ -294,6 +348,32 @@ export default function LeadDetailPage() {
                             </div>
                         </div>
                     ))}
+
+                    {/* Admin notes — free text about this lead, separate from
+                        the WhatsApp transcript, auto-saved as they type. */}
+                    <div style={{ marginTop: 24 }}>
+                        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 10 }}>
+                            <div style={{ fontSize: 11, fontWeight: 800, color: 'var(--fog)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                                {t.notes}
+                            </div>
+                            <span style={{ fontSize: 11, color: notesStatus === 'error' ? '#b91c1c' : 'var(--fog)' }}>
+                                {notesStatus === 'saving' && t.notesSaving}
+                                {notesStatus === 'saved' && t.notesSaved}
+                                {notesStatus === 'error' && t.notesError}
+                            </span>
+                        </div>
+                        <textarea
+                            value={notesDraft}
+                            onChange={(e) => handleNotesChange(e.target.value)}
+                            placeholder={t.notesPlaceholder}
+                            rows={5}
+                            style={{
+                                width: '100%', padding: '10px 14px', fontSize: 13, fontFamily: 'inherit',
+                                border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)',
+                                outline: 'none', resize: 'vertical', color: 'var(--ink)', background: '#fff',
+                            }}
+                        />
+                    </div>
                 </div>
             </div>
         </div>

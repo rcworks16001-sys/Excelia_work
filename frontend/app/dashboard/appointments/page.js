@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import api from '../../../lib/api';
-import { APPOINTMENT_STATUS_CONFIG } from '../../../lib/statusConfig';
+import { APPOINTMENT_STATUSES, APPOINTMENT_STATUS_CONFIG } from '../../../lib/statusConfig';
 import { useDashboardLanguage } from '../../../lib/useDashboardLanguage';
 import { dashboardStrings, propertyTypeLabels, timeOfDayLabels } from '../../../lib/dashboardStrings';
 
@@ -75,35 +75,59 @@ export default function AppointmentsPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [search, setSearch] = useState('');
+    const [statusFilter, setStatusFilter] = useState('all');
+    const [statusUpdateError, setStatusUpdateError] = useState('');
     const [lang] = useDashboardLanguage();
     const t = dashboardStrings[lang].appointments;
 
-    useEffect(() => {
-        (async () => {
-            try {
-                const response = await api.get('/appointments');
-                setAppointments(response.data.appointments);
-            } catch (err) {
-                if (err.response?.status === 401) {
-                    router.push('/login');
-                    return;
-                }
-                setError(t.loadError);
-            } finally {
-                setLoading(false);
+    const fetchAppointments = async () => {
+        try {
+            const response = await api.get('/appointments');
+            setAppointments(response.data.appointments);
+        } catch (err) {
+            if (err.response?.status === 401) {
+                router.push('/login');
+                return;
             }
-        })();
+            setError(t.loadError);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchAppointments();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    const handleStatusChange = async (appointmentId, newStatus) => {
+        const previous = appointments.find((a) => a.id === appointmentId)?.status;
+        setStatusUpdateError('');
+        setAppointments((prev) => prev.map((a) => (a.id === appointmentId ? { ...a, status: newStatus } : a))); // optimistic
+        try {
+            await api.patch(`/appointments/${appointmentId}/status`, { status: newStatus });
+        } catch (err) {
+            setAppointments((prev) => prev.map((a) => (a.id === appointmentId ? { ...a, status: previous } : a))); // revert
+            if (err.response?.status === 401) {
+                router.push('/login');
+                return;
+            }
+            setStatusUpdateError(t.statusUpdateError);
+        }
+    };
+
     const filteredAppointments = appointments.filter((appt) => {
+        if (statusFilter !== 'all' && appt.status !== statusFilter) return false;
         if (!search) return true;
-        const q = search.toLowerCase();
-        return (appt.lead_name || '').toLowerCase().includes(q)
-            || (appt.lead_phone || '').toLowerCase().includes(q)
-            || (appt.neighbourhood || '').toLowerCase().includes(q)
-            || (appt.city || '').toLowerCase().includes(q);
+        // Match every word in the query against the combined fields, not the
+        // whole query against one field — a copy-pasted "Neighbourhood, City"
+        // string otherwise never matches (see the same fix on Properties).
+        const haystack = `${appt.lead_name || ''} ${appt.lead_phone || ''} ${appt.neighbourhood || ''} ${appt.city || ''}`.toLowerCase();
+        const words = search.toLowerCase().replace(/[,.;]/g, ' ').split(/\s+/).filter(Boolean);
+        return words.every((w) => haystack.includes(w));
     });
+
+    const countFor = (status) => appointments.filter((a) => a.status === status).length;
 
     return (
         <div>
@@ -111,6 +135,33 @@ export default function AppointmentsPage() {
             <p style={{ fontSize: 13, color: 'var(--fog)', marginBottom: 24 }}>
                 {t.subtitle}
             </p>
+
+            {/* Status filter — also doubles as a count-per-status summary, mirrors the Leads page */}
+            <div style={{ display: 'flex', gap: 3, background: '#fff', border: '1px solid var(--ice)', borderRadius: 12, padding: 4, marginBottom: 16, flexWrap: 'wrap', width: 'fit-content' }}>
+                <button
+                    onClick={() => setStatusFilter('all')}
+                    style={{
+                        padding: '6px 13px', borderRadius: 9, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                        background: statusFilter === 'all' ? 'var(--ink)' : 'transparent',
+                        color: statusFilter === 'all' ? '#fff' : 'var(--ash)',
+                    }}
+                >
+                    {t.all} ({appointments.length})
+                </button>
+                {APPOINTMENT_STATUSES.map((s) => (
+                    <button
+                        key={s}
+                        onClick={() => setStatusFilter(s)}
+                        style={{
+                            padding: '6px 13px', borderRadius: 9, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                            background: statusFilter === s ? 'var(--ink)' : 'transparent',
+                            color: statusFilter === s ? '#fff' : 'var(--ash)',
+                        }}
+                    >
+                        {APPOINTMENT_STATUS_CONFIG[s].label[lang]} ({countFor(s)})
+                    </button>
+                ))}
+            </div>
 
             <input
                 type="text"
@@ -124,6 +175,7 @@ export default function AppointmentsPage() {
             />
 
             {error && <div style={{ color: '#b91c1c', fontSize: 13, marginBottom: 16 }}>{error}</div>}
+            {statusUpdateError && <div style={{ color: '#b91c1c', fontSize: 13, marginBottom: 16 }}>{statusUpdateError}</div>}
 
             <div style={{ background: '#fff', border: '1px solid var(--ice)', borderRadius: 'var(--r-card)', overflow: 'hidden' }}>
                 <div style={{
@@ -144,7 +196,7 @@ export default function AppointmentsPage() {
                         <div style={{ fontSize: 32, marginBottom: 10 }}>📅</div>
                         <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>{t.emptyTitle}</div>
                         <p style={{ fontSize: 13, color: 'var(--fog)' }}>
-                            {search ? t.emptyFilterHint : t.emptyHint}
+                            {search || statusFilter !== 'all' ? t.emptyFilterHint : t.emptyHint}
                         </p>
                     </div>
                 )}
@@ -170,13 +222,20 @@ export default function AppointmentsPage() {
                         <div>
                             <div style={{ fontSize: 12 }}>{formatRequested(appt, lang)}</div>
                         </div>
-                        <span className="badge" style={{
-                            background: APPOINTMENT_STATUS_CONFIG[appt.status]?.bg || 'var(--mist)',
-                            color: APPOINTMENT_STATUS_CONFIG[appt.status]?.color || 'var(--ash)',
-                            width: 'fit-content',
-                        }}>
-                            {APPOINTMENT_STATUS_CONFIG[appt.status]?.label[lang] || appt.status}
-                        </span>
+                        <select
+                            value={appt.status}
+                            onChange={(e) => handleStatusChange(appt.id, e.target.value)}
+                            className="badge"
+                            style={{
+                                background: APPOINTMENT_STATUS_CONFIG[appt.status]?.bg || 'var(--mist)',
+                                color: APPOINTMENT_STATUS_CONFIG[appt.status]?.color || 'var(--ash)',
+                                width: 'fit-content', border: 'none', cursor: 'pointer', fontWeight: 700,
+                            }}
+                        >
+                            {APPOINTMENT_STATUSES.map((s) => (
+                                <option key={s} value={s}>{APPOINTMENT_STATUS_CONFIG[s].label[lang]}</option>
+                            ))}
+                        </select>
                         <div style={{ fontSize: 12, color: 'var(--fog)' }}>{formatDate(appt.created_at, lang)}</div>
                     </div>
                 ))}
