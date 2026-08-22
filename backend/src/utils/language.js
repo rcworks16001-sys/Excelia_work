@@ -118,6 +118,14 @@ const BOT_STRINGS = {
         fr: "C'est noté ! Votre demande de visite a été enregistrée pour :",
         en: "Got it! Your viewing request has been saved for:",
     },
+    listing_answer: {
+        fr: "Voici les détails de ce bien :",
+        en: "Here are the details for that property:",
+    },
+    midflow_ack: {
+        fr: "Bien sûr ! Dites-moi ce qui vous conviendrait.",
+        en: "Of course! Just let me know what works for you.",
+    },
     media_resent: {
         fr: "Bien sûr, je vous renvoie les photos de ce bien.",
         en: "Of course — sending you the photos for that property now.",

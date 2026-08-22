@@ -75,6 +75,7 @@ Rules given this history:
 - NEVER repeat a greeting, welcome, or introduction you have already sent. You have already met this customer.
 - NEVER re-ask something they have already answered.
 - Vary your wording; do not reuse a sentence you already used above.
+- If you need to ask again for something you already asked for, REPHRASE it and first acknowledge whatever just happened. Never restate your previous question word for word.
 - Refer naturally to what they already told you where it helps.`;
 };
 
@@ -97,6 +98,51 @@ const callComposer = async (systemPrompt, userPrompt, fallback) => {
         console.error('replyComposer failed, using hardcoded fallback:', error.message);
         return fallback;
     }
+};
+
+// What the flow is still waiting on, so a mid-flow interruption ends by
+// picking the thread back up rather than leaving the lead hanging — phrased
+// as guidance so the model rewords it instead of repeating itself.
+const stillNeededLine = (stillNeeded) => {
+    if (stillNeeded === 'date') return '\n\nEnd by inviting them, in a FRESH wording, to tell you a day and time that suits them. Do not repeat your earlier phrasing of that question, and do not ask which property — they have already chosen one.';
+    if (stillNeeded === 'selection') return '\n\nEnd by inviting them, in a FRESH wording, to tell you which property they would like (by number). Do not repeat your earlier phrasing of that question.';
+    return '';
+};
+
+// ── composeListingAnswer ──
+// They asked something about a property ("what is the price again?").
+// The full property card is appended by the caller, so the model must not
+// restate any figure itself.
+const composeListingAnswer = async ({ lang, userMessage, propertyCard, history, stillNeeded }) => {
+    const system = `${BASE_PERSONA}
+
+Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
+
+Your task: the customer asked a question about a property. The property's full details are printed directly beneath your message, so answer by pointing them to it in ONE short sentence — do NOT state the price, location, or any other figure yourself.${stillNeededLine(stillNeeded)}${historyBlock(history)}`;
+
+    const user = `The customer asked: "${userMessage}"
+
+Write your line (the details below it are handled for you).`;
+
+    const line = await callComposer(system, user, BOT_STRINGS.listing_answer[lang]);
+    return `${line}\n\n${propertyCard}`;
+};
+
+// ── composeMidFlowAcknowledgement ──
+// A greeting or a thanks arriving in the middle of a booking. They have
+// already met us — never re-welcome or re-introduce.
+const composeMidFlowAcknowledgement = async ({ lang, userMessage, history, stillNeeded, listingCount }) => {
+    const system = `${BASE_PERSONA}
+
+Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
+
+Your task: the customer sent a greeting or a pleasantry in the MIDDLE of an ongoing booking conversation. Acknowledge it warmly in a few words. You have already greeted this customer — do NOT welcome them, introduce yourself, or explain what you do again.${listingCount ? ` They are currently looking at ${listingCount} properties you already sent them; do not re-send or re-describe those.` : ''}${stillNeededLine(stillNeeded)}${historyBlock(history)}`;
+
+    const user = `The customer wrote: "${userMessage}"
+
+Write the reply.`;
+
+    return callComposer(system, user, BOT_STRINGS.midflow_ack[lang]);
 };
 
 // ── composeResultsIntro ──
@@ -231,12 +277,12 @@ Your task: the customer has said they'd like to book a viewing, but hasn't said 
 };
 
 // ── composeAskDatetime ──
-const composeAskDatetime = async ({ lang, propertyLabel, history }) => {
+const composeAskDatetime = async ({ lang, propertyLabel, history, isReAsk }) => {
     const system = `${BASE_PERSONA}
 
 Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
 
-Your task: the customer has chosen a property to view. Confirm their choice briefly and ask what date and time would suit them. One or two short sentences.
+Your task: ${isReAsk ? 'you already asked this customer for a date and they replied with something else, so ask again in COMPLETELY DIFFERENT words, briefly acknowledging their message first. Do not repeat your earlier phrasing, and do not ask which property — that is already settled.' : 'the customer has chosen a property to view. Confirm their choice briefly and ask what date and time would suit them.'} One or two short sentences.
 
 You may refer to the chosen property as: "${propertyLabel}". Do not state its price or any other detail.${historyBlock(history)}`;
 
@@ -295,7 +341,7 @@ Write the reply.`;
 // They asked to see more of a specific listing ("share some photos of 1").
 // The media itself is sent separately by the caller; this is just the line
 // that goes with it.
-const composeMediaResent = async ({ lang, propertyLabel, hasMedia, history }) => {
+const composeMediaResent = async ({ lang, propertyLabel, hasMedia, history, stillNeeded }) => {
     const system = `${BASE_PERSONA}
 
 Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
@@ -305,7 +351,7 @@ ${hasMedia
         ? 'Confirm warmly in ONE short sentence that the media is on its way, and invite them to say if they would like to arrange a viewing. Do not describe the photos — you have not seen them.'
         : "Tell them honestly in ONE short sentence that you don't have photos for it yet, and offer that the office can share more details or arrange a viewing. Do not apologise more than once."}
 
-You may refer to the property as: "${propertyLabel}". Do NOT state its price or any other detail.${historyBlock(history)}`;
+You may refer to the property as: "${propertyLabel}". Do NOT state its price or any other detail.${stillNeededLine(stillNeeded)}${historyBlock(history)}`;
 
     const user = 'Write the reply.';
 
@@ -315,6 +361,8 @@ You may refer to the property as: "${propertyLabel}". Do NOT state its price or 
 module.exports = {
     composeResultsIntro,
     composeMediaResent,
+    composeListingAnswer,
+    composeMidFlowAcknowledgement,
     composeNoResults,
     composeGreeting,
     composeOffTopic,

@@ -20,6 +20,8 @@ const {
     composeBookingDeclined,
     composeSelectionUnclear,
     composeMediaResent,
+    composeListingAnswer,
+    composeMidFlowAcknowledgement,
 } = require('../utils/replyComposer');
 const {
     getOrCreateLead,
@@ -383,7 +385,7 @@ const ViewingSelectionSchema = z.object({
     // ("actually under 400000", "show me apartments instead") was being read
     // as an attempt to pick a listing. Detecting it lets the flow drop back
     // into search instead of trapping them in the booking prompt.
-    decision: z.enum(['decline', 'select', 'wants_to_book', 'new_search', 'request_media', 'unclear']),
+    decision: z.enum(['decline', 'select', 'wants_to_book', 'new_search', 'request_media', 'question', 'greeting', 'closing', 'unclear']),
     selected_number: z.number().int().nullable(),
 });
 
@@ -402,8 +404,11 @@ const extractViewingSelection = async (text, listingCount, history = []) => {
   * "wants_to_book" — they clearly want to book but have NOT said which property ("yes", "yes I want to book an appointment", "oui je veux visiter"). An enthusiastic yes is NOT unclear.
   * "new_search" — they are changing or refining what they're looking for rather than picking from the list ("actually under 400000", "do you have apartments instead?", "what about Bè?", "something cheaper"). This is a NEW requirement, not a selection.
   * "request_media" — they are asking to SEE more of a specific listing rather than to book it ("can you share some photos of 1", "more pictures of the second one", "send me the video", "où se trouve le 2 ?"). Set selected_number to the listing they mean. Wanting to look at photos is NOT the same as choosing to book a viewing.
-  * "decline" — no / not interested / not now.
-  * "unclear" — only if none of the above fit (e.g. they asked something unrelated instead of answering).
+  * "question" — they are ASKING something about a listing rather than choosing ("what is the price of 2?", "how many bedrooms?", "where is it?"). Set selected_number if they name one.
+  * "greeting" — a greeting or pleasantry ("hello", "hi", "bonjour", "ca va ?"). NOT a selection and NOT a decline.
+  * "closing" — thanks / goodbye ("thanks", "merci", "ok great"). NOT a decline of the booking.
+  * "decline" — ONLY an explicit refusal to book ("no", "not interested", "not now", "non merci"). A question, a greeting or a request for photos is NEVER a decline.
+  * "unclear" — only if none of the above fit.
 - selected_number: the 1-based number they selected, only when decision is "select" — must be between 1 and ${listingCount}. null otherwise.`,
             messages: [{ role: 'user', content: `${history.length ? `RECENT CONVERSATION (oldest first):\n${formatHistoryForPrompt(history)}\n\n---\n\n` : ''}CUSTOMER'S REPLY:\n${text}` }],
             output_config: { format: zodOutputFormat(ViewingSelectionSchema) },
@@ -420,7 +425,12 @@ const extractViewingSelection = async (text, listingCount, history = []) => {
 // booking is never blocked just because the exact time-of-day couldn't be
 // resolved from free text. Also detects a change-of-mind at this stage.
 const AppointmentDateTimeSchema = z.object({
-    decision: z.enum(['datetime_given', 'decline']),
+    // Only 'decline' may cancel a booking. Everything else keeps the flow
+    // alive — previously a question like "what is the price again?" was
+    // classified as decline and silently destroyed the booking.
+    decision: z.enum(['datetime_given', 'decline', 'request_media', 'question', 'greeting', 'closing', 'unclear']),
+    // Which listing the media/question is about, when they name one.
+    selected_number: z.number().int().nullable(),
     iso_datetime: z.string().nullable(),
     resolved_date: z.string().nullable(),
     time_of_day: z.enum(['morning', 'afternoon', 'evening']).nullable(),
@@ -429,8 +439,8 @@ const AppointmentDateTimeSchema = z.object({
 // `now` is injectable so the backfill script can re-resolve an OLD booking
 // using the date it was actually made — "demain" means nothing without the
 // reference point it was said relative to.
-const extractAppointmentDateTime = async (text, referenceNow = null) => {
-    const fallback = { decision: 'datetime_given', iso_datetime: null, resolved_date: null, time_of_day: null };
+const extractAppointmentDateTime = async (text, referenceNow = null, history = []) => {
+    const fallback = { decision: 'unclear', selected_number: null, iso_datetime: null, resolved_date: null, time_of_day: null };
     if (!text || !text.trim()) return fallback;
 
     try {
@@ -440,11 +450,25 @@ const extractAppointmentDateTime = async (text, referenceNow = null) => {
             max_tokens: 200,
             temperature: 0,
             system: `The current date/time is ${now} (UTC). The user was just asked for their preferred date and time for a property viewing in Togo, and is replying in French or English, possibly with a relative expression ("demain", "next Friday at 3pm", "vendredi prochain").
-- decision: "decline" ONLY if they explicitly say they no longer want to book ("non merci", "actually forget it", "not anymore"). Anything else is "datetime_given" — including vague, partial or confusing replies like a bare number, "asap", or "whenever". A reply you cannot parse is NOT a decline; leave the date fields null and keep decision "datetime_given".
+- decision — what the reply actually is:
+  * "datetime_given" — they gave a date and/or time, even partially ("tomorrow", "friday afternoon", "asap").
+  * "request_media" — they are asking to SEE the property ("can you share some photos?", "send me the video", "any pictures?"). This is NOT a decline.
+  * "question" — they are asking something about the property ("what is the price again?", "where is it located?", "how many bedrooms?"). This is NOT a decline.
+  * "greeting" — a greeting or pleasantry ("hello", "hi", "bonjour").
+  * "closing" — thanks / goodbye ("thank you", "merci").
+  * "decline" — ONLY an explicit refusal to continue booking ("no thanks", "forget it", "not anymore", "j'annule"). A question, a greeting, or a request for photos is NEVER a decline. If you are unsure, use "unclear", never "decline".
+  * "unclear" — anything else you cannot place.
+- selected_number: if they refer to a specific listing by number, that number; otherwise null.
 - iso_datetime: resolve their reply to an absolute ISO 8601 datetime (assume Togo's timezone, UTC+0) ONLY if you can confidently determine both a date AND a specific clock time. If the time is vague ("matin", "morning", "dans la journée"), return null here — use resolved_date + time_of_day instead. Never invent a clock time.
 - resolved_date: the calendar date they mean, as "YYYY-MM-DD" (Togo time, UTC+0), whenever the DATE is determinable — including relative expressions ("demain" -> the day after the current date above, "vendredi" -> the next upcoming Friday). Fill this in even when you also filled iso_datetime, and even when the time of day is unknown. null only if no date can be determined at all.
 - time_of_day: "morning", "afternoon", or "evening" if they indicated a coarse part of the day ("matin", "après-midi", "le soir"). If they gave a specific clock time instead, still classify it (e.g. 15h -> "afternoon"). null if there is no time indication whatsoever.`,
-            messages: [{ role: 'user', content: text }],
+            messages: [{ role: 'user', content: `${history.length ? `RECENT CONVERSATION (oldest first):
+${formatHistoryForPrompt(history)}
+
+---
+
+` : ''}CUSTOMER'S REPLY:
+${text}` }],
             output_config: { format: zodOutputFormat(AppointmentDateTimeSchema) },
         });
         return response.parsed_output ?? fallback;
@@ -508,9 +532,46 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
         if (property) {
             const propertyLabel = `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`;
             const hasMedia = (property.photos && property.photos.length > 0) || property.video_url;
-            const text = await composeMediaResent({ lang, propertyLabel, hasMedia, history });
-            return { text, mediaListings: hasMedia ? [property] : null };
+            const mediaText = await composeMediaResent({ lang, propertyLabel, hasMedia, history, stillNeeded: 'selection' });
+            return { text: mediaText, mediaListings: hasMedia ? [property] : null };
         }
+    }
+
+    // Asked for photos but didn't say which listing — ask, don't guess.
+    if (selection.decision === 'request_media') {
+        return {
+            text: await composeSelectionUnclear({ lang, userMessage: text, listingCount: pendingListingIds.length, history }),
+            mediaListings: null,
+        };
+    }
+
+    // A question about one of the listings — answer it from the DB and stay
+    // in the selection flow rather than treating it as a failed choice.
+    if (selection.decision === 'question') {
+        const idx = Number.isInteger(selection.selected_number)
+            && selection.selected_number >= 1
+            && selection.selected_number <= pendingListingIds.length
+            ? selection.selected_number - 1 : null;
+        const property = idx === null ? null : await getPropertyById(pendingListingIds[idx]);
+        if (property) {
+            return {
+                text: await composeListingAnswer({
+                    lang, userMessage: text, propertyCard: formatListingsBody([property], lang), history, stillNeeded: 'selection',
+                }),
+                mediaListings: null,
+            };
+        }
+    }
+
+    // Greeting or thanks mid-selection — they have already met us; acknowledge
+    // and pick the thread back up instead of sending a booking prompt.
+    if (selection.decision === 'greeting' || selection.decision === 'closing') {
+        return {
+            text: await composeMidFlowAcknowledgement({
+                lang, userMessage: text, history, stillNeeded: 'selection', listingCount: pendingListingIds.length,
+            }),
+            mediaListings: null,
+        };
     }
 
     if (selection.decision === 'decline') {
@@ -555,12 +616,53 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
 };
 
 // ── Booking flow, step 2: their preferred date/time ──
-const handleViewingDateTimeReply = async ({ leadId, propertyId, text, lang, history }) => {
-    const result = await extractAppointmentDateTime(text);
+// Last-resort guard so a message like "Hello" can never be stored as the
+// requested viewing time. Only used when the model claimed datetime_given
+// but resolved no date at all.
+const looksLikeDateText = (text) => /\d|today|tomorrow|tonight|morning|afternoon|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|aujourd|demain|matin|midi|soir|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|semaine/i.test(text || '');
 
+const handleViewingDateTimeReply = async ({ leadId, propertyId, text, lang, history }) => {
+    const result = await extractAppointmentDateTime(text, null, history);
+    const property = await getPropertyById(propertyId);
+    const propertyLabel = property
+        ? `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`
+        : '';
+
+    // ONLY an explicit refusal clears the booking. Everything else keeps the
+    // flow alive — a question or a photo request used to be classified as a
+    // decline here, which silently cancelled the lead's booking.
     if (result.decision === 'decline') {
         await clearPendingAction(leadId);
-        return composeBookingDeclined({ lang, history });
+        return { text: await composeBookingDeclined({ lang, history }), mediaListings: null };
+    }
+
+    // They want to see the property before committing to a time.
+    if (result.decision === 'request_media' && property) {
+        const hasMedia = (property.photos && property.photos.length > 0) || property.video_url;
+        return {
+            text: await composeMediaResent({ lang, propertyLabel, hasMedia, history, stillNeeded: 'date' }),
+            mediaListings: hasMedia ? [property] : null,
+        };
+    }
+
+    // A question about the property. Answered from the DB row, then we pick
+    // the conversation back up where it was.
+    if (result.decision === 'question' && property) {
+        return {
+            text: await composeListingAnswer({
+                lang, userMessage: text, propertyCard: formatListingsBody([property], lang), history, stillNeeded: 'date',
+            }),
+            mediaListings: null,
+        };
+    }
+
+    // Greeting / thanks / anything unparseable mid-flow: acknowledge and
+    // re-ask for the date, WITHOUT restarting or cancelling.
+    if (result.decision !== 'datetime_given' || (!result.resolved_date && !result.iso_datetime && !looksLikeDateText(text))) {
+        return {
+            text: await composeAskDatetime({ lang, propertyLabel, history, isReAsk: true }),
+            mediaListings: null,
+        };
     }
 
     await createAppointment({
@@ -573,14 +675,12 @@ const handleViewingDateTimeReply = async ({ leadId, propertyId, text, lang, hist
     });
     await clearPendingAction(leadId);
 
-    const property = await getPropertyById(propertyId);
-    const propertyLabel = property
-        ? `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`
-        : '';
-
     // Wrapper is composed; the factual recap underneath stays deterministic.
     const confirmation = await composeBookingConfirmed({ lang, history });
-    return `${confirmation}\n\n${propertyLabel}\n${text}`;
+    return { text: `${confirmation}
+
+${propertyLabel}
+${text}`, mediaListings: null };
 };
 
 // Sends the reply, saves it to the conversation log, and swallows its own
@@ -715,13 +815,16 @@ const handleMessage = async (req, res) => {
         if (replyBody !== undefined && replyBody !== null) {
             // already handled by the booking flow above
         } else if (lead.pendingAction === 'awaiting_viewing_datetime') {
-            replyBody = await handleViewingDateTimeReply({
+            const dateResult = await handleViewingDateTimeReply({
                 leadId,
                 propertyId: lead.pendingPropertyId,
                 text,
                 lang,
                 history,
             });
+            replyBody = dateResult.text;
+            // They asked to see the property before naming a time.
+            if (dateResult.mediaListings) listingsShown = dateResult.mediaListings;
         } else {
             const filters = understanding;
 
