@@ -26,6 +26,11 @@ const ACTIONS = {
     // decision NOT to interfere. See the rule ordering note below.
     DELEGATE_BOOKING_FLOW: 'DELEGATE_BOOKING_FLOW',
 
+    // Stop and get a person. Knowing when NOT to answer is a feature: price
+    // negotiation, complaints and legal/financial questions are all places
+    // where a confident wrong answer costs the agency far more than a pause.
+    HANDOFF: 'HANDOFF',
+
     SWITCH_LANGUAGE: 'SWITCH_LANGUAGE',
     CLOSE: 'CLOSE',
     ASK_WHAT_THEY_WANT: 'ASK_WHAT_THEY_WANT',
@@ -69,6 +74,16 @@ const RULES = [
         // deliberately rather than having the decision taken from them here.
         when: (ctx) => Boolean(ctx.pendingAction),
         action: ACTIONS.DELEGATE_BOOKING_FLOW,
+    },
+    {
+        name: 'wants_human',
+        // Second only to protecting a booking. Deliberately ABOVE closing,
+        // greeting and search: someone asking for a person, disputing a price
+        // or raising a complaint must not have that softened into a cheerful
+        // property suggestion. If they were mid-booking, rule #1 already won —
+        // the booking handlers deal with it there.
+        when: (ctx) => ctx.intent === 'wants_human',
+        action: ACTIONS.HANDOFF,
     },
     {
         name: 'explicit_language_switch',

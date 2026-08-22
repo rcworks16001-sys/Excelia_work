@@ -32,6 +32,18 @@ export const APPOINTMENT_STATUS_CONFIG = {
 // dropdown. No --red token exists in globals.css; the rest of this codebase
 // uses the raw #b91c1c red directly for destructive/warning states (delete
 // buttons, error text), so "Rented" follows that same convention here.
+// Lead temperature — mirrors TEMPERATURE_BANDS in backend/src/utils/leadScoring.js
+// and the CHECK on lead_profiles.lead_temperature. Only 'hot' is styled loudly:
+// if every band shouted, none of them would mean anything.
+export const LEAD_TEMPERATURES = ['hot', 'warm', 'qualified', 'cold'];
+
+export const TEMPERATURE_CONFIG = {
+    hot: { label: { fr: '🔥 Chaud', en: '🔥 Hot' }, bg: '#fee2e2', color: '#b91c1c' },
+    warm: { label: { fr: 'Tiède', en: 'Warm' }, bg: 'var(--yellow)', color: 'var(--ink)' },
+    qualified: { label: { fr: 'Qualifié', en: 'Qualified' }, bg: 'var(--green)', color: 'var(--ink)' },
+    cold: { label: { fr: 'Froid', en: 'Cold' }, bg: 'var(--mist)', color: 'var(--fog)' },
+};
+
 // Rent vs sale — mirrors the CHECK constraint on properties.transaction in
 // backend/src/db/migrate.js and VALID_TRANSACTIONS in propertyController.js.
 // Deliberately quieter styling than the availability badge next to it: this is

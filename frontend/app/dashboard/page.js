@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import api from '../../lib/api';
-import { STATUSES, STATUS_CONFIG } from '../../lib/statusConfig';
+import { STATUSES, STATUS_CONFIG, TEMPERATURE_CONFIG } from '../../lib/statusConfig';
 import { useDashboardLanguage } from '../../lib/useDashboardLanguage';
 import { dashboardStrings, formatTimeAgo } from '../../lib/dashboardStrings';
 
@@ -187,7 +187,28 @@ export default function LeadsOverviewPage() {
                             borderBottom: i < filteredLeads.length - 1 ? '1px solid var(--ice)' : 'none',
                         }}
                     >
-                        <div style={{ fontSize: 13, fontWeight: 700 }}>{lead.name || t.unknownName}</div>
+                        <div style={{ fontSize: 13, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                            {lead.name || t.unknownName}
+                            {/* Only hot is marked. Badging every lead with its
+                                band would just add colour to every row and
+                                stop any of it meaning anything. */}
+                            {lead.lead_temperature === 'hot' && (
+                                <span style={{
+                                    fontSize: 9, fontWeight: 800, padding: '2px 6px', borderRadius: 999,
+                                    background: TEMPERATURE_CONFIG.hot.bg, color: TEMPERATURE_CONFIG.hot.color,
+                                }} title={`${t.scoreLabel}: ${lead.lead_score}/100`}>
+                                    {TEMPERATURE_CONFIG.hot.label[lang]}
+                                </span>
+                            )}
+                            {lead.needs_human && (
+                                <span style={{
+                                    fontSize: 9, fontWeight: 800, padding: '2px 6px', borderRadius: 999,
+                                    background: '#fef3c7', color: '#92400e',
+                                }}>
+                                    {t.needsHumanBadge}
+                                </span>
+                            )}
+                        </div>
                         <div style={{ fontSize: 12, color: 'var(--ash)', fontFamily: 'monospace' }}>{lead.phone}</div>
                         <span className="badge" style={{ background: 'var(--mist)', color: 'var(--ash)', width: 'fit-content' }}>
                             {LANGUAGE_LABEL[lead.language] || lead.language}

@@ -248,6 +248,22 @@ decision space instantly.
 - Never extract a field nothing consumes. An unused schema field degrades extraction of the fields
   that matter (this is why emotion/objection are deferred until something branches on them).
 
+### Scoring, escalation and notifications
+- **`leadScoring.js` is pure code.** Every point traces to something the lead actually did, so "why is
+  this lead hot?" has an answer. The blueprint's "+10 for providing a phone number" is deliberately
+  dropped — WhatsApp gives it on message one, so it carries no information.
+- **Status auto-advance is FORWARD-ONLY, and `converted`/`lost` are absorbing** (`advanceLeadStatus`).
+  Both are human judgements the bot cannot observe. Without this, an admin marking a lead `lost` would
+  watch it reappear in their pipeline on the lead's next message.
+- **Escalation (`wants_human`) does NOT clear pending booking state.** Negotiating a price mid-booking
+  must reach a person while keeping the viewing alive — only an explicit `decline` ever ends a
+  booking. Both booking NLUs carry a `wants_human` decision for exactly this escape.
+- **Notifications dedupe by default** (`dedupeWindowHours`). A lead who stays hot across ten messages
+  is notified once; the "became hot" alert fires on the *transition*, not on the state. A bell that
+  re-raises the same fact becomes a number people learn to ignore.
+- Notification reasons are stored as machine values in `metadata`, never as prose — the dashboard has
+  an FR/EN toggle, and a sentence baked in at write time is stuck in whichever language was active.
+
 ### The bot has conversation memory
 `getRecentConversation(leadId, 10)` (in `leadController.js`) reads the last 10 turns from `conversations` — the table was always being written to, but nothing read it back until this was added. It's fed into **both** the understanding call and every composer. Without this the bot was stateless per message and visibly broken:
 - `"Thank you"` was classified as a greeting and answered with a full welcome message.

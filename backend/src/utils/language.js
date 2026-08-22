@@ -142,6 +142,13 @@ const BOT_STRINGS = {
         fr: "Avec plaisir ! N'hésitez pas à m'écrire si vous avez besoin d'autre chose.",
         en: "You're welcome! Feel free to message me any time if you need anything else.",
     },
+    // Handoff. Deliberately promises only what the calling code has actually
+    // done — the lead is flagged for a human in the dashboard, so saying the
+    // team will get back to them is true. It must NOT promise a timeframe.
+    handoff: {
+        fr: "Je préfère laisser un conseiller EXCELIA vous répondre sur ce point. Je transmets votre demande — vous pouvez aussi joindre l'agence au +228 91062626.",
+        en: "I'd rather have an EXCELIA advisor answer that one properly. I'm passing your request on — you can also reach the office on +228 91062626.",
+    },
     language_switched: {
         fr: "Bien sûr, je continue en français. Que recherchez-vous ?",
         en: "Of course, I'll continue in English. What are you looking for?",

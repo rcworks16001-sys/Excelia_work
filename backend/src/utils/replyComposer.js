@@ -244,6 +244,37 @@ Write the redirect.`;
     return callComposer(system, user, BOT_STRINGS.off_topic[lang]);
 };
 
+// ── composeHandoff ──
+// The bot stepping back. The calling code has genuinely flagged this lead for a
+// human in the dashboard, so "I'm passing this on" is a true statement — which
+// is the only reason BASE_PERSONA's no-claimed-actions rule permits saying it.
+// It must still not invent a timeframe, quote a price, or hint at what the
+// agency might agree to.
+const REASON_CONTEXT = {
+    asked_for_agent: 'They asked to speak to a person.',
+    negotiation: 'They want to negotiate the price or terms — only the agency can discuss that.',
+    complaint: 'They are unhappy about something. Acknowledge it warmly and without being defensive; do not argue or explain it away.',
+    legal_or_financial: 'They asked a legal, contractual or financial question that must not be answered speculatively.',
+};
+
+const composeHandoff = async ({ lang, userMessage, reason, history }) => {
+    const system = `${BASE_PERSONA}
+
+Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
+
+Your task: this needs a human colleague, not you. ${REASON_CONTEXT[reason] || 'They need a person rather than an assistant.'}
+
+Tell them warmly that you are passing this to an EXCELIA advisor who will follow up, and that they can also call the office on +228 91062626. This IS true — they have been flagged for a colleague — so you may say it.
+
+Do NOT attempt to answer the question yourself. Do NOT quote or imply any price, discount, or what the agency might agree to. Do NOT promise when someone will reply. Two short sentences at most.${historyBlock(history)}`;
+
+    const user = `The customer wrote: "${userMessage}"
+
+Write the handover message.`;
+
+    return callComposer(system, user, BOT_STRINGS.handoff[lang]);
+};
+
 // ── composeUnsupportedMedia ──
 // They sent an image/sticker/voice note. Answer in THEIR language.
 const composeUnsupportedMedia = async ({ lang, mediaType }) => {
@@ -397,6 +428,7 @@ module.exports = {
     composeNoResults,
     composeGreeting,
     composeOffTopic,
+    composeHandoff,
     composeUnsupportedMedia,
     composeLanguageSwitch,
     composeClosing,

@@ -7,6 +7,7 @@ import { getToken, clearToken } from '../../lib/api';
 import { useDashboardLanguage } from '../../lib/useDashboardLanguage';
 import { dashboardStrings } from '../../lib/dashboardStrings';
 import { LanguageToggle } from '../../components/LanguageToggle';
+import NotificationBell from '../../components/NotificationBell';
 
 export default function DashboardLayout({ children }) {
     const router = useRouter();
@@ -52,6 +53,7 @@ export default function DashboardLayout({ children }) {
                     EXCELIA
                 </span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <NotificationBell t={t} lang={lang} />
                     <LanguageToggle lang={lang} setLang={setLang} />
                     <button
                         onClick={handleLogout}

@@ -149,6 +149,37 @@ const setPendingViewingDatetime = async (leadId, propertyId) => {
 
 // `client` lets this join a caller's transaction (see pool.withTransaction) —
 // clearing the flow after createAppointment must be atomic with it.
+// ── advanceLeadStatus(leadId, target) ──
+// The bot moving a lead along the pipeline. Two hard rules, both about not
+// fighting the human using the dashboard:
+//
+//   1. FORWARD ONLY. An admin who has already marked someone 'qualified' must
+//      not watch the bot drag them back to 'contacted' on their next message.
+//   2. 'converted' and 'lost' are ABSORBING — they are human judgements about
+//      an outcome the bot cannot observe. Once set, the bot never overrides
+//      them. Without this, an admin marking a lead 'lost' would see it silently
+//      reappear in their active pipeline the next time that person said hello.
+//
+// Returns the status actually in effect, so callers can tell whether they moved.
+const STATUS_LADDER = ['new', 'contacted', 'qualified', 'site_visit', 'converted'];
+const ABSORBING_STATUSES = ['converted', 'lost'];
+
+const advanceLeadStatus = async (leadId, target, client = pool) => {
+    const targetRank = STATUS_LADDER.indexOf(target);
+    if (targetRank === -1) return null;
+
+    const current = await client.query('SELECT status FROM leads WHERE id = $1', [leadId]);
+    if (current.rows.length === 0) return null;
+    const currentStatus = current.rows[0].status;
+
+    if (ABSORBING_STATUSES.includes(currentStatus)) return currentStatus;
+    const currentRank = STATUS_LADDER.indexOf(currentStatus);
+    if (currentRank >= targetRank) return currentStatus;
+
+    await client.query('UPDATE leads SET status = $1 WHERE id = $2', [target, leadId]);
+    return target;
+};
+
 const clearPendingAction = async (leadId, client = pool) => {
     await client.query(
         'UPDATE leads SET pending_action = NULL, pending_property_id = NULL, pending_listing_ids = NULL, pending_set_at = NULL WHERE id = $1',
@@ -162,6 +193,21 @@ const clearPendingAction = async (leadId, client = pool) => {
 // needs the real number to actually call leads back; see CLAUDE.md).
 const LEAD_COLUMNS = 'id, phone, name, language, status, notes, created_at, last_message_at';
 
+// Scoring lives on lead_profiles, so the dashboard's lead views LEFT JOIN it —
+// LEFT because a lead who has only ever said "hi" has no profile row yet, and
+// they must still appear in the list. COALESCE gives those rows the same
+// defaults the column would have, so the frontend never has to special-case a
+// missing profile.
+const LEAD_PROFILE_JOIN = `
+    LEFT JOIN lead_profiles pr ON pr.lead_id = l.id
+`;
+const LEAD_PROFILE_COLUMNS = `
+    COALESCE(pr.lead_score, 0) AS lead_score,
+    COALESCE(pr.lead_temperature, 'cold') AS lead_temperature,
+    COALESCE(pr.needs_human, false) AS needs_human,
+    pr.handoff_reason
+`;
+
 // The ONE list of valid pipeline stages — backend enforcement lives here;
 // the frontend mirrors these same 6 literal values in its status dropdown
 // (a UI label list, not shared business logic, so it isn't imported across
@@ -169,7 +215,11 @@ const LEAD_COLUMNS = 'id, phone, name, language, status, notes, created_at, last
 const VALID_STATUSES = ['new', 'contacted', 'qualified', 'site_visit', 'converted', 'lost'];
 
 const listLeads = async () => {
-    const result = await pool.query(`SELECT ${LEAD_COLUMNS} FROM leads ORDER BY last_message_at DESC`);
+    const result = await pool.query(
+        `SELECT ${LEAD_COLUMNS.split(', ').map((c) => `l.${c}`).join(', ')}, ${LEAD_PROFILE_COLUMNS}
+           FROM leads l ${LEAD_PROFILE_JOIN}
+          ORDER BY l.last_message_at DESC`
+    );
     return result.rows;
 };
 
@@ -184,7 +234,12 @@ const list = async (req, res) => {
 };
 
 const getLeadWithConversation = async (id) => {
-    const leadResult = await pool.query(`SELECT ${LEAD_COLUMNS} FROM leads WHERE id = $1`, [id]);
+    const leadResult = await pool.query(
+        `SELECT ${LEAD_COLUMNS.split(', ').map((c) => `l.${c}`).join(', ')}, ${LEAD_PROFILE_COLUMNS}
+           FROM leads l ${LEAD_PROFILE_JOIN}
+          WHERE l.id = $1`,
+        [id]
+    );
     if (leadResult.rows.length === 0) return null;
 
     const lead = leadResult.rows[0];
@@ -344,6 +399,9 @@ module.exports = {
     updateStatus,
     updateNotes,
     sendReply,
+    advanceLeadStatus,
     VALID_STATUSES,
+    STATUS_LADDER,
+    ABSORBING_STATUSES,
     PENDING_STATE_TTL_HOURS,
 };

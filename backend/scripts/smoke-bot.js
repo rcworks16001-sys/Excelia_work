@@ -331,6 +331,7 @@ const run = async () => {
         const hit = new Set();
         const cases = [
             { pendingAction: 'awaiting_viewing_datetime', intent: 'greeting' },
+            { pendingAction: null, intent: 'wants_human' },
             { pendingAction: null, intent: 'greeting', languageSwitchRequest: 'en' },
             { pendingAction: null, intent: 'closing' },
             { pendingAction: null, intent: 'booking_intent' },
@@ -345,7 +346,7 @@ const run = async () => {
 
         // The invariant that has broken this project twice: nothing outranks an
         // active booking. Not a greeting, not a language switch, not a search.
-        const intents = ['greeting', 'closing', 'off_topic', 'search', 'booking_intent', 'unclear'];
+        const intents = ['greeting', 'closing', 'off_topic', 'search', 'booking_intent', 'unclear', 'wants_human'];
         const leaks = intents.filter((intent) => nextBestAction({
             pendingAction: 'awaiting_viewing_datetime', intent, languageSwitchRequest: 'en',
         }).action !== ACTIONS.DELEGATE_BOOKING_FLOW);
@@ -355,6 +356,60 @@ const run = async () => {
         // reason to interrogate someone who asked a real question.
         check('unclear falls through to search',
             nextBestAction({ pendingAction: null, intent: 'unclear' }).action === ACTIONS.SEARCH_AND_SHOW);
+    });
+
+    // ── Scenarios 26-29: scoring, escalation and notifications ──
+
+    await scenario('HANDOFF: price negotiation goes to a human, not to the bot', async (p) => {
+        await send(p, 'I want a villa in Lome');
+        const r = await send(p, 'can you lower the price? is it negotiable?');
+        const lead = await getLeadState(p);
+        const prof = await getProfile(lead.id);
+
+        check('flagged for a human', prof.needs_human === true, `needs_human=${prof.needs_human}`);
+        check('reason recorded', Boolean(prof.handoff_reason), `reason=${prof.handoff_reason}`);
+        // The whole point: it must not improvise a discount or imply one.
+        check('did not negotiate or quote a discount',
+            !/\b(discount|reduce|lower it|remise|réduction|can offer)\b/i.test(r.reply), r.reply);
+        check('notification raised for the agency',
+            (await pool.query("SELECT 1 FROM notifications WHERE lead_id = $1 AND type = 'needs_human'", [lead.id])).rows.length === 1);
+        // The invariant: escalating is not the same as giving up on the
+        // viewing. Only an explicit refusal may end a booking flow.
+        check('BOOKING SURVIVED the escalation',
+            r.pendingAction === 'awaiting_viewing_selection', `pending=${r.pendingAction}`);
+    });
+
+    await scenario('HANDOFF: asking to speak to a person is honoured', async (p) => {
+        const r = await send(p, 'I would like to speak to a real agent please');
+        const lead = await getLeadState(p);
+        const prof = await getProfile(lead.id);
+        check('flagged for a human', prof.needs_human === true, `needs_human=${prof.needs_human}`);
+        check('did not just show listings instead', !/F CFA/.test(r.reply), r.reply);
+    });
+
+    await scenario('SCORING: engagement raises the score and advances the pipeline', async (p) => {
+        await send(p, 'I want to rent a villa in Lome, budget 400000, I need it this month');
+        const lead = await getLeadState(p);
+        const prof = await getProfile(lead.id);
+        check('score computed', prof.lead_score > 0, `score=${prof.lead_score}`);
+        check('specific requirement scores above cold', prof.lead_temperature !== 'cold', `temp=${prof.lead_temperature}`);
+
+        const status = (await pool.query('SELECT status FROM leads WHERE id = $1', [lead.id])).rows[0].status;
+        check('bot advanced the pipeline past "new"', status !== 'new', `status=${status}`);
+    });
+
+    await scenario('SCORING: the bot never overrides a human\'s "lost" verdict', async (p) => {
+        await send(p, 'I want a villa in Lome with 4 bedrooms, budget 400000, moving this month');
+        const lead = await getLeadState(p);
+
+        // An admin decides this lead is dead.
+        await pool.query("UPDATE leads SET status = 'lost' WHERE id = $1", [lead.id]);
+
+        // The lead keeps talking. Their status must NOT come back to life —
+        // 'lost' is a human judgement the bot cannot observe or overrule.
+        await send(p, 'actually I am ready to book a viewing this week');
+        const status = (await pool.query('SELECT status FROM leads WHERE id = $1', [lead.id])).rows[0].status;
+        check('"lost" is absorbing', status === 'lost', `status=${status}`);
     });
 
     console.log(`\n${'='.repeat(72)}`);

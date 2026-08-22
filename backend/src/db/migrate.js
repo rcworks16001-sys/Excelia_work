@@ -222,6 +222,64 @@ const runMigrations = async () => {
         // isn't quietly relied on via a constraint that could later change.)
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_profiles_lead_id ON lead_profiles (lead_id);`);
 
+        // Lead scoring. Lives on lead_profiles rather than leads because it is
+        // derived entirely from what the profile knows — recomputed after every
+        // turn, never edited by hand.
+        await pool.query(`ALTER TABLE lead_profiles ADD COLUMN IF NOT EXISTS lead_score INTEGER NOT NULL DEFAULT 0;`);
+        await pool.query(`ALTER TABLE lead_profiles ADD COLUMN IF NOT EXISTS lead_temperature TEXT NOT NULL DEFAULT 'cold' CHECK (lead_temperature IN (
+            'hot', 'warm', 'qualified', 'cold'
+        ));`);
+        // Set when the bot decides a human should take over (they asked for an
+        // agent, tried to negotiate, complained, or we repeatedly failed to
+        // understand them). needs_human stays true until an admin clears it.
+        await pool.query(`ALTER TABLE lead_profiles ADD COLUMN IF NOT EXISTS needs_human BOOLEAN NOT NULL DEFAULT false;`);
+        await pool.query(`ALTER TABLE lead_profiles ADD COLUMN IF NOT EXISTS handoff_reason TEXT;`);
+        await pool.query(`ALTER TABLE lead_profiles ADD COLUMN IF NOT EXISTS handoff_at TIMESTAMPTZ;`);
+
+        // lead_events — the behavioural history the conversation transcript
+        // cannot give you. "Which properties get rejected most?" and "how many
+        // searches return nothing?" are questions about patterns across leads,
+        // and the transcript is prose.
+        //
+        // property_id is ON DELETE SET NULL, deliberately NOT CASCADE: deleting
+        // a listing must never erase a lead's history. Same principle as the
+        // 409 guard on property deletion — booking and interest history
+        // outlives the listing it referred to.
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS lead_events (
+                id SERIAL PRIMARY KEY,
+                lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,
+                metadata JSONB DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ DEFAULT now()
+            );
+        `);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_events_lead_id ON lead_events (lead_id, created_at DESC);`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_events_type ON lead_events (event_type, created_at DESC);`);
+
+        // notifications — what the dashboard's bell shows. A separate table
+        // rather than deriving the list from lead_profiles on read, because a
+        // notification is a point-in-time fact ("this lead turned hot on
+        // Tuesday") that must survive the underlying state changing, and
+        // because read/unread is per-notification state with nowhere else to
+        // live.
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS notifications (
+                id SERIAL PRIMARY KEY,
+                lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+                type TEXT NOT NULL CHECK (type IN ('needs_human', 'hot_lead', 'appointment_booked')),
+                title TEXT NOT NULL,
+                detail TEXT,
+                metadata JSONB DEFAULT '{}'::jsonb,
+                read_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT now()
+            );
+        `);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_notifications_lead_id ON notifications (lead_id);`);
+        // The bell's own query: unread first, newest first.
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications (read_at, created_at DESC);`);
+
         // Records WHEN the current pending booking state was set, so it can be
         // expired. Without it a lead who goes quiet mid-booking stays parked in
         // 'awaiting_viewing_datetime' forever, and their "hello" three days

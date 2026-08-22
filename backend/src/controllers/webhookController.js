@@ -8,7 +8,10 @@ const pool = require('../db/index');
 const { searchPropertiesWithFallback, getPropertyById, getKnownLocations } = require('./propertyController');
 const {
     getProfile, mergeProfile, recordShownListings, recordInterest, profileToSearchFilters,
+    flagForHuman, refreshLeadSignals,
 } = require('./leadProfileController');
+const { recordEvent, EVENT_TYPES } = require('./leadEventController');
+const { createNotification } = require('./notificationController');
 const { ACTIONS, nextBestAction } = require('../utils/nextBestAction');
 const {
     composeResultsIntro,
@@ -16,6 +19,7 @@ const {
     composeGreeting,
     composeOffTopic,
     composeUnsupportedMedia,
+    composeHandoff,
     composeLanguageSwitch,
     composeClosing,
     composeBookingPrompt,
@@ -250,7 +254,14 @@ const NLUSchema = z.object({
     // classified as a greeting and got a full welcome message back, and a
     // plain "yes I want to book an appointment" used to fall through to
     // "I didn't quite catch that" because only a bare number was accepted.
-    intent: z.enum(['search', 'off_topic', 'greeting', 'closing', 'booking_intent', 'unclear']),
+    // 'wants_human' covers everything the bot must not attempt: an explicit
+    // request for a person, price negotiation, complaints, and legal/financial
+    // questions. They are ONE intent because they all produce one action —
+    // hand over. The specific reason rides along in handoff_reason instead of
+    // splitting this into four intents that branch identically.
+    intent: z.enum(['search', 'off_topic', 'greeting', 'closing', 'booking_intent', 'wants_human', 'unclear']),
+    // Only meaningful when intent is 'wants_human'.
+    handoff_reason: z.enum(['asked_for_agent', 'negotiation', 'complaint', 'legal_or_financial']).nullable(),
     // Explicit request to be spoken to in another language, in ANY phrasing
     // ("now please english", "tu peux parler anglais ?"). Reading intent here
     // is what a fixed regex could never do reliably.
@@ -355,6 +366,7 @@ Field guidance:
   * "closing" — thanks, goodbyes, acknowledgements that end an exchange ("thank you", "merci", "ok great", "bye", "that's all"). NEVER classify these as "greeting".
   * "greeting" — an OPENING greeting with no property information ("Bonjour", "Hi"). If the conversation already has messages, a bare "hi" is usually still a greeting, but "thanks" is "closing".
   * "off_topic" — clearly unrelated to real estate (weather, jokes, chit-chat).
+  * "wants_human" — they need a person, not a bot. Use for: asking to speak to someone ("can I talk to an agent?", "je veux parler à quelqu'un"); trying to negotiate price or terms ("can you lower the price?", "c'est négociable ?"); complaining about the agency or a property; or asking a legal/financial/contractual question (titre foncier disputes, contracts, loans, taxes). Prefer this over guessing whenever answering wrongly could mislead them about money or legal standing.
   * "unclear" — only if genuinely none of the above fit.
 - language_request: set to "en" or "fr" ONLY if the customer is asking to be SPOKEN TO in that language, in any phrasing ("now please english", "please english", "english now", "in english", "tu peux répondre en anglais ?", "français svp"). This is about the language of YOUR replies — not about the language they happen to be writing in, and not about a property feature (e.g. "near the English School" is NOT a language request). null otherwise.
 - message_language: the language the NEW message is actually written in, "fr" or "en". For a very short or ambiguous message, infer from the conversation rather than guessing.
@@ -373,6 +385,7 @@ Field guidance:
 - bedrooms_min / bedrooms_max: use when they give a RANGE ("2 or 3 bedrooms", "at least 3", "entre 2 et 4"). For a single number, set both to that number. null if bedrooms were not mentioned.
 - purpose: "self_use" (to live in), "investment" (to resell/appreciate), "rental_income" (to rent out). null unless they say so.
 - timeline: "immediate", "within_1_month", "within_3_months", "later", or "exploring" (just browsing, no timeframe). null unless they indicate one.
+- handoff_reason: only when intent is "wants_human" — "asked_for_agent", "negotiation", "complaint", or "legal_or_financial". null otherwise.
 - cleared_fields: list any field the customer has EXPLICITLY told you to drop or stop applying — "forget the budget", "anywhere is fine now", "actually never mind the area", "peu importe le quartier". This is ONLY for a deliberate retraction. Simply not mentioning a field in this message is NOT a retraction — leave it out of this list and set that field to null. Almost always an empty array.
 
 ${profileBlock}
@@ -397,7 +410,7 @@ const extractSearchFilters = async (text, history = [], profile = null) => {
         intent: 'unclear', language_request: null, message_language: null,
         city: null, neighbourhood: null, type: null, price_max: null, bedrooms: null, transaction: null,
         budget_stretch_max: null, bedrooms_min: null, bedrooms_max: null,
-        purpose: null, timeline: null, cleared_fields: [],
+        purpose: null, timeline: null, handoff_reason: null, cleared_fields: [],
     };
     if (!text || !text.trim()) return fallback;
 
@@ -463,12 +476,16 @@ const ViewingSelectionSchema = z.object({
     // ("actually under 400000", "show me apartments instead") was being read
     // as an attempt to pick a listing. Detecting it lets the flow drop back
     // into search instead of trapping them in the booking prompt.
-    decision: z.enum(['decline', 'select', 'express_interest', 'wants_to_book', 'new_search', 'request_media', 'question', 'greeting', 'closing', 'unclear']),
+    // 'wants_human' is an ESCAPE, not an exit: negotiating a price or asking
+    // for an agent mid-booking must reach a person WITHOUT destroying the
+    // viewing they were arranging. It escalates and keeps the flow alive.
+    decision: z.enum(['decline', 'select', 'express_interest', 'wants_to_book', 'new_search', 'request_media', 'question', 'greeting', 'closing', 'wants_human', 'unclear']),
     selected_number: z.number().int().nullable(),
+    handoff_reason: z.enum(['asked_for_agent', 'negotiation', 'complaint', 'legal_or_financial']).nullable(),
 });
 
 const extractViewingSelection = async (text, listingCount, history = []) => {
-    const fallback = { decision: 'unclear', selected_number: null };
+    const fallback = { decision: 'unclear', selected_number: null, handoff_reason: null };
     if (!text || !text.trim()) return fallback;
 
     try {
@@ -484,6 +501,7 @@ const extractViewingSelection = async (text, listingCount, history = []) => {
   * "new_search" — they are changing or refining what they're looking for rather than picking from the list ("actually under 400000", "do you have apartments instead?", "what about Bè?", "something cheaper"). This is a NEW requirement, not a selection.
   * "request_media" — they are asking to SEE more of a specific listing rather than to book it ("can you share some photos of 1", "more pictures of the second one", "send me the video", "où se trouve le 2 ?"). Set selected_number to the listing they mean. Wanting to look at photos is NOT the same as choosing to book a viewing.
   * "question" — they are ASKING something about a listing rather than choosing ("what is the price of 2?", "how many bedrooms?", "where is it?"). Set selected_number if they name one.
+  * "wants_human" — they need a person: asking to speak to an agent, trying to NEGOTIATE the price or terms ("can you lower the price?", "c'est négociable ?", "any discount?"), complaining, or asking a legal/financial/contractual question. Set handoff_reason. Note this is different from "question" — asking what the price IS is a question; asking for it to be CHANGED is a negotiation only a person can handle.
   * "greeting" — a greeting or pleasantry ("hello", "hi", "bonjour", "ca va ?"). NOT a selection and NOT a decline.
   * "closing" — thanks / goodbye ("thanks", "merci", "ok great"). NOT a decline of the booking.
   * "decline" — ONLY an explicit refusal to book ("no", "not interested", "not now", "non merci"). A question, a greeting or a request for photos is NEVER a decline.
@@ -507,7 +525,10 @@ const AppointmentDateTimeSchema = z.object({
     // Only 'decline' may cancel a booking. Everything else keeps the flow
     // alive — previously a question like "what is the price again?" was
     // classified as decline and silently destroyed the booking.
-    decision: z.enum(['datetime_given', 'decline', 'request_media', 'question', 'greeting', 'closing', 'unclear']),
+    // 'wants_human' escalates WITHOUT cancelling the booking — see the note on
+    // ViewingSelectionSchema. Only 'decline' ends a booking, still.
+    decision: z.enum(['datetime_given', 'decline', 'request_media', 'question', 'greeting', 'closing', 'wants_human', 'unclear']),
+    handoff_reason: z.enum(['asked_for_agent', 'negotiation', 'complaint', 'legal_or_financial']).nullable(),
     // Which listing the media/question is about, when they name one.
     selected_number: z.number().int().nullable(),
     iso_datetime: z.string().nullable(),
@@ -519,7 +540,7 @@ const AppointmentDateTimeSchema = z.object({
 // using the date it was actually made — "demain" means nothing without the
 // reference point it was said relative to.
 const extractAppointmentDateTime = async (text, referenceNow = null, history = []) => {
-    const fallback = { decision: 'unclear', selected_number: null, iso_datetime: null, resolved_date: null, time_of_day: null };
+    const fallback = { decision: 'unclear', selected_number: null, iso_datetime: null, resolved_date: null, time_of_day: null, handoff_reason: null };
     if (!text || !text.trim()) return fallback;
 
     try {
@@ -535,6 +556,7 @@ const extractAppointmentDateTime = async (text, referenceNow = null, history = [
   * "question" — they are asking something about the property ("what is the price again?", "where is it located?", "how many bedrooms?"). This is NOT a decline.
   * "greeting" — a greeting or pleasantry ("hello", "hi", "bonjour").
   * "closing" — thanks / goodbye ("thank you", "merci").
+  * "wants_human" — they need a person: asking for an agent, trying to NEGOTIATE price or terms ("can you lower the price?", "c'est négociable ?"), complaining, or asking a legal/financial question. Set handoff_reason. This is NOT a decline — they may still want the viewing.
   * "decline" — ONLY an explicit refusal to continue booking ("no thanks", "forget it", "not anymore", "j'annule"). A question, a greeting, or a request for photos is NEVER a decline. If you are unsure, use "unclear", never "decline".
   * "unclear" — anything else you cannot place.
 - selected_number: if they refer to a specific listing by number, that number; otherwise null.
@@ -653,6 +675,16 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
         };
     }
 
+    // Needs a person. Escalates WITHOUT clearing the pending state — they may
+    // still want to view something once a colleague has answered them.
+    if (selection.decision === 'wants_human') {
+        await flagForHuman(leadId, selection.handoff_reason || 'asked_for_agent');
+        return {
+            text: await composeHandoff({ lang, userMessage: text, reason: selection.handoff_reason, history }),
+            mediaListings: null,
+        };
+    }
+
     if (selection.decision === 'decline') {
         await clearPendingAction(leadId);
         return { text: await composeBookingDeclined({ lang, history }), mediaListings: null };
@@ -751,6 +783,17 @@ const handleViewingDateTimeReply = async ({ leadId, propertyId, text, lang, hist
         return { text: await composeBookingDeclined({ lang, history }), mediaListings: null };
     }
 
+    // Needs a person. Escalate but DO NOT touch the pending state — they were
+    // arranging a viewing and asking about price or an agent doesn't undo
+    // that. Only an explicit decline ends a booking.
+    if (result.decision === 'wants_human') {
+        await flagForHuman(leadId, result.handoff_reason || 'asked_for_agent');
+        return {
+            text: await composeHandoff({ lang, userMessage: text, reason: result.handoff_reason, history }),
+            mediaListings: null,
+        };
+    }
+
     // They want to see the property before committing to a time.
     if (result.decision === 'request_media' && property) {
         const hasMedia = (property.photos && property.photos.length > 0) || property.video_url;
@@ -795,6 +838,18 @@ const handleViewingDateTimeReply = async ({ leadId, propertyId, text, lang, hist
             client,
         });
         await clearPendingAction(leadId, client);
+        await recordEvent(leadId, EVENT_TYPES.SITE_VISIT_BOOKED, { propertyId, metadata: { requestedText: text } }, client);
+    });
+
+    // Outside the transaction: a notification failing must not roll back a
+    // booking the lead has already been told about. Every viewing request is
+    // worth surfacing, so no dedupe window here.
+    await createNotification({
+        leadId,
+        type: 'appointment_booked',
+        title: 'New viewing request',
+        detail: propertyLabel ? `${propertyLabel} — "${text}"` : text,
+        dedupeWindowHours: 0,
     });
 
     // Wrapper is composed; the factual recap underneath stays deterministic.
@@ -981,7 +1036,19 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                 profile,
             });
 
-            if (action === ACTIONS.SWITCH_LANGUAGE) {
+            if (action === ACTIONS.HANDOFF) {
+                // Flag FIRST, then reply. The composer is allowed to say "I'm
+                // passing this on" only because this line has already made it
+                // true — reversing the order would make the bot's promise
+                // conditional on a write that might fail.
+                await flagForHuman(leadId, filters.handoff_reason || 'asked_for_agent', {
+                    leadName: contactName, leadPhone: phone,
+                });
+                replyBody = await composeHandoff({
+                    lang, userMessage: text, reason: filters.handoff_reason, history,
+                });
+                isGreetingReply = true; // a handover is not a moment to also welcome them
+            } else if (action === ACTIONS.SWITCH_LANGUAGE) {
                 // They only asked to change language — confirm in the NEW
                 // language, rather than treating "now please english" as
                 // off-topic or dumping listings at them. A switch bundled WITH
@@ -1022,6 +1089,12 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                 const { listings, relaxed } = await searchPropertiesWithFallback(searchFilters);
 
                 if (listings.length === 0) {
+                    // Worth recording as its own event: "how often does the
+                    // catalogue fail a real request?" is the single most
+                    // useful signal about what inventory to acquire next.
+                    await recordEvent(leadId, EVENT_TYPES.SEARCH_RETURNED_NOTHING, {
+                        metadata: { filters: searchFilters },
+                    });
                     replyBody = await composeNoResults({ lang, userMessage: text, history });
                 } else {
                     // Claude writes ONLY the intro line; the listing cards and
@@ -1035,6 +1108,9 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                     // order) so a reply like "2" resolves to a specific property.
                     await setPendingViewingSelection(leadId, listings.map((p) => p.id));
                     await recordShownListings(leadId, listings.map((p) => p.id));
+                    await recordEvent(leadId, EVENT_TYPES.PROPERTIES_SHOWN, {
+                        metadata: { propertyIds: listings.map((p) => p.id), relaxed },
+                    });
                     listingsShown = listings;
                 }
             }
@@ -1049,6 +1125,13 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
             : replyBody;
 
         await logBotReply(leadId, replyText);
+
+        // Recompute score, temperature and pipeline status from everything we
+        // now know. Last, so it sees this turn's profile changes and any
+        // appointment just created. Best-effort inside — derived analytics must
+        // never be why a lead doesn't get answered.
+        await refreshLeadSignals(leadId, { leadName: contactName, leadPhone: phone });
+
         return { replyText, mediaListings: listingsShown, lang, leadId };
     } catch (error) {
         console.error('Error handling incoming message:', error);

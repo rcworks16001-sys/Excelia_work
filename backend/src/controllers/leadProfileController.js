@@ -1,4 +1,8 @@
 const pool = require('../db/index');
+const { scoreLead } = require('../utils/leadScoring');
+const { recordEvent, EVENT_TYPES } = require('./leadEventController');
+const { createNotification } = require('./notificationController');
+const { advanceLeadStatus } = require('./leadController');
 
 // ── lead_profiles: what the bot KNOWS about a lead ──
 //
@@ -33,7 +37,9 @@ const PROFILE_COLUMNS = `
     bedrooms_min, bedrooms_max, budget_max, budget_stretch_max,
     purpose, timeline, last_objection,
     liked_property_ids, rejected_property_ids, rejection_reasons,
-    last_properties_shown, conversation_summary, updated_at
+    last_properties_shown, conversation_summary,
+    lead_score, lead_temperature, needs_human, handoff_reason, handoff_at,
+    updated_at
 `;
 
 // ── getProfile(leadId) ──
@@ -201,9 +207,98 @@ const profileToSearchFilters = (profile) => {
     };
 };
 
+// ── flagForHuman(leadId, reason) ──
+// The bot deciding it should stop. Sets the flag, records the event, and raises
+// a notification so a person actually finds out — before this, a lead could ask
+// to speak to someone and nothing whatsoever would reach the agency.
+//
+// needs_human stays true until an admin clears it: the lead's situation has not
+// resolved just because they sent another message.
+const flagForHuman = async (leadId, reason, { leadName, leadPhone } = {}) => {
+    await pool.query(
+        `INSERT INTO lead_profiles (lead_id, needs_human, handoff_reason, handoff_at)
+         VALUES ($1, true, $2, now())
+         ON CONFLICT (lead_id) DO UPDATE SET
+            needs_human = true, handoff_reason = EXCLUDED.handoff_reason,
+            handoff_at = now(), updated_at = now()`,
+        [leadId, reason]
+    );
+    await recordEvent(leadId, EVENT_TYPES.HANDOFF_TRIGGERED, { metadata: { reason } });
+    await createNotification({
+        leadId,
+        type: 'needs_human',
+        title: `${leadName || leadPhone || 'A lead'} needs a person`,
+        // The reason travels as machine-readable metadata, not prose: the
+        // dashboard has an FR/EN toggle, and a sentence baked in at write time
+        // would be stuck in whichever language happened to be chosen then.
+        metadata: { reason },
+        // Short window: if they ask again hours later that IS worth re-raising.
+        dedupeWindowHours: 6,
+    });
+};
+
+// ── refreshLeadSignals(leadId, { leadName, leadPhone }) ──
+// Recomputes everything derived from the profile after a turn: the score, the
+// temperature band, and the pipeline status. Called once per message, after the
+// profile has been merged.
+//
+// Best-effort throughout — none of this is worth failing a reply over.
+const refreshLeadSignals = async (leadId, { leadName, leadPhone } = {}) => {
+    try {
+        const profile = await getProfile(leadId);
+        if (!profile) return null;
+
+        const counters = await pool.query(
+            `SELECT
+                (SELECT COUNT(*)::int FROM appointments WHERE lead_id = $1) AS appointment_count,
+                (SELECT COUNT(*)::int FROM conversations WHERE lead_id = $1 AND sender = 'user') AS message_count`,
+            [leadId]
+        );
+        const { appointment_count: appointmentCount, message_count: messageCount } = counters.rows[0];
+
+        const { score, temperature } = scoreLead(profile, { appointmentCount, messageCount });
+        const previousTemperature = profile.lead_temperature;
+
+        await pool.query(
+            `UPDATE lead_profiles SET lead_score = $1, lead_temperature = $2, updated_at = now() WHERE lead_id = $3`,
+            [score, temperature, leadId]
+        );
+
+        // Notify on the TRANSITION into hot, not on being hot — otherwise every
+        // subsequent message from an engaged lead re-raises the same alert and
+        // the bell becomes noise.
+        if (temperature === 'hot' && previousTemperature !== 'hot') {
+            await recordEvent(leadId, EVENT_TYPES.BECAME_HOT, { metadata: { score } });
+            await createNotification({
+                leadId,
+                type: 'hot_lead',
+                title: `${leadName || leadPhone || 'A lead'} is now a hot lead`,
+                detail: `Score ${score}/100 — strong buying signals. Worth calling while they're engaged.`,
+            });
+        }
+
+        // Pipeline position, derived rather than typed. Forward-only, and
+        // never overriding a human's 'converted'/'lost' — see advanceLeadStatus.
+        if (appointmentCount > 0) {
+            await advanceLeadStatus(leadId, 'site_visit');
+        } else if (temperature === 'hot' || temperature === 'warm') {
+            await advanceLeadStatus(leadId, 'qualified');
+        } else {
+            await advanceLeadStatus(leadId, 'contacted');
+        }
+
+        return { score, temperature };
+    } catch (error) {
+        console.error('Failed to refresh lead signals:', error.message);
+        return null;
+    }
+};
+
 module.exports = {
     getProfile,
     mergeProfile,
+    flagForHuman,
+    refreshLeadSignals,
     recordShownListings,
     recordInterest,
     recordRejectionReason,
