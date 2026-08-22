@@ -245,6 +245,18 @@ The Claude extraction prompt is built dynamically per call (`buildNluSystemPromp
 6. Off-topic message → redirect in their language: "Je suis spécialisé dans la recherche immobilière au Togo."
 7. Every inbound message and every bot reply is saved to the `conversations` table.
 
+### The bot has conversation memory — keep it that way
+`getRecentConversation(leadId, 10)` feeds the last 10 turns into **both** the understanding call and every composer. This is not optional polish; without it the bot was stateless per message and visibly broken:
+- `"Thank you"` was classified as a greeting and answered with a full welcome message.
+- `"Yes I want to book an appointment"` was rejected with *"I didn't quite catch that"*, because the selection NLU only accepted a bare number.
+- `"under 400000"` after a search reset the filters instead of refining them.
+
+Rules to preserve when touching this:
+- **Never call an NLU or composer without passing `history`.** Every one of them takes it.
+- Intents that exist specifically to prevent the above: `closing` (thanks/bye — must never be answered with a greeting), `booking_intent` (wants to book, hasn't named a listing), and `new_search` on the selection path (a refinement after results, which must drop the booking state and re-search rather than trapping the lead in "which number?").
+- Filters **carry forward** across turns — the NLU is instructed to repeat previously-stated values unless the lead changes their mind.
+- The composer prompt forbids repeating a greeting or a question already sent in the same conversation.
+
 ---
 
 ## Mistakes to never make

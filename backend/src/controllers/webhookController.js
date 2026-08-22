@@ -13,11 +13,18 @@ const {
     composeOffTopic,
     composeUnsupportedMedia,
     composeLanguageSwitch,
+    composeClosing,
+    composeBookingPrompt,
+    composeAskDatetime,
+    composeBookingConfirmed,
+    composeBookingDeclined,
+    composeSelectionUnclear,
 } = require('../utils/replyComposer');
 const {
     getOrCreateLead,
     getLeadState,
     saveConversationMessage,
+    getRecentConversation,
     setPendingViewingSelection,
     setPendingViewingDatetime,
     clearPendingAction,
@@ -40,6 +47,10 @@ const NLU_MODEL = 'claude-haiku-4-5-20251001';
 // v18.0 on 2026-01-26; every outbound send call (text now, image/location in
 // Steps 4/5) must import this constant rather than hardcoding a version.
 const GRAPH_API_VERSION = 'v22.0';
+
+// How many past turns the bot "remembers". Enough to follow a multi-step
+// requirement and a booking flow without sending a huge prompt every message.
+const HISTORY_TURNS = 10;
 
 // ── Verify webhook ──
 const verify = (req, res) => {
@@ -226,7 +237,19 @@ const sendListingMedia = async (to, leadId, listings, lang) => {
 const PROPERTY_TYPES = ['chambre_salon', 'appartement', 'villa', 'terrain', 'mini_villa', 'appartement_meuble'];
 
 const NLUSchema = z.object({
-    intent: z.enum(['search', 'off_topic', 'greeting', 'unclear']),
+    // 'closing' (thanks/bye) and 'booking_intent' ("yes I'd like to book") are
+    // what stop the two worst stateless failures: thanking the bot used to be
+    // classified as a greeting and got a full welcome message back, and a
+    // plain "yes I want to book an appointment" used to fall through to
+    // "I didn't quite catch that" because only a bare number was accepted.
+    intent: z.enum(['search', 'off_topic', 'greeting', 'closing', 'booking_intent', 'unclear']),
+    // Explicit request to be spoken to in another language, in ANY phrasing
+    // ("now please english", "tu peux parler anglais ?"). Reading intent here
+    // is what a fixed regex could never do reliably.
+    language_request: z.enum(['fr', 'en']).nullable(),
+    // The language the message itself is written in. Reported here so this
+    // one call replaces the separate detectLanguage() round-trip.
+    message_language: z.enum(['fr', 'en']),
     city: z.string().nullable(),
     neighbourhood: z.string().nullable(),
     type: z.enum(PROPERTY_TYPES).nullable(),
@@ -261,8 +284,18 @@ const buildNluSystemPrompt = (knownLocations = []) => {
 
     return `You are the natural-language-understanding engine for EXCELIA, a WhatsApp real estate chatbot for Togo. Read the incoming WhatsApp message (French or English — understand both) and classify it.
 
+You are given the RECENT CONVERSATION so far. Read the new message IN THAT CONTEXT — a short reply like "yes", "the second one" or "under 200000" only makes sense against what was just said.
+
 Field guidance:
-- intent: "search" if the message expresses any interest in finding/renting/buying/viewing property, even with only one detail given (just a city, just a budget, etc). "off_topic" if clearly unrelated to real estate (weather, jokes, unrelated complaints, general chit-chat). "greeting" for pure greetings/small talk with zero property information ("Bonjour", "Hi", "Ça va ?"). "unclear" only if none of the above fit.
+- intent:
+  * "search" — any interest in finding/renting/buying/viewing property, even with a single detail ("just Lomé", "something cheap"). ALSO use this when the customer refines or adds to an earlier request ("under 200000", "actually make it 3 bedrooms") — see the filter-merging rule below.
+  * "booking_intent" — they say they want to book/visit/see a property but have NOT identified which one ("yes I want to book an appointment", "je veux visiter"). Do NOT classify this as "unclear".
+  * "closing" — thanks, goodbyes, acknowledgements that end an exchange ("thank you", "merci", "ok great", "bye", "that's all"). NEVER classify these as "greeting".
+  * "greeting" — an OPENING greeting with no property information ("Bonjour", "Hi"). If the conversation already has messages, a bare "hi" is usually still a greeting, but "thanks" is "closing".
+  * "off_topic" — clearly unrelated to real estate (weather, jokes, chit-chat).
+  * "unclear" — only if genuinely none of the above fit.
+- language_request: set to "en" or "fr" ONLY if the customer is asking to be SPOKEN TO in that language, in any phrasing ("now please english", "please english", "english now", "in english", "tu peux répondre en anglais ?", "français svp"). This is about the language of YOUR replies — not about the language they happen to be writing in, and not about a property feature (e.g. "near the English School" is NOT a language request). null otherwise.
+- message_language: the language the NEW message is actually written in, "fr" or "en". For a very short or ambiguous message, infer from the conversation rather than guessing.
 - city / neighbourhood: the place name as the user meant it, with accents restored if dropped (e.g. "lome" -> "Lomé"). null if not mentioned.${locationGuidance}
 - type: map the user's wording to exactly one of these enum values — "chambre_salon" (single room / studio / "une chambre"), "appartement" (unfurnished apartment), "villa", "terrain" (land / "parcelle"), "mini_villa", "appartement_meuble" (furnished apartment / "meublé"). null if the type is not clearly one of these — never guess a value outside this list.
   Vocabulary customers actually use, and what it maps to here:
@@ -274,11 +307,28 @@ Field guidance:
 - price_max: the user's stated maximum budget as a plain integer number of XOF, with no currency symbol, spaces, or separators (e.g. "45000", "45 000 F CFA", "45k" -> 45000). Treat any stated budget as the maximum. null if no budget given.
 - bedrooms: integer number of bedrooms/chambres mentioned. null if not mentioned.
 
-Never fabricate a value you cannot support from the message. When genuinely uncertain about a field, use null rather than guessing.`;
+CRITICAL — CARRY FORWARD WHAT THEY ALREADY TOLD YOU:
+The customer builds their requirement up across several messages. For every filter field, if the NEW message does not mention it but an EARLIER message in the conversation did, repeat that earlier value. Only use null when neither the new message nor the conversation ever mentioned it.
+Example: "I want a villa in Lomé" then "under 300000" must produce city "Lomé", type "villa" AND price_max 300000 — not price alone.
+The exception is an explicit change of mind ("actually, a apartment instead"), where the new value replaces the old one.
+
+Never fabricate a value neither the message nor the conversation supports. When genuinely uncertain about a field, use null rather than guessing.`;
 };
 
-const extractSearchFilters = async (text) => {
-    const fallback = { intent: 'unclear', city: null, neighbourhood: null, type: null, price_max: null, bedrooms: null };
+// Renders stored transcript rows as a readable dialogue for the prompt.
+const formatHistoryForPrompt = (history = []) =>
+    history
+        .map((m) => `${m.sender === 'bot' ? 'You (EXCELIA)' : 'Customer'}: ${m.message}`)
+        .join('\n');
+
+// `history` is the last few turns (oldest first) from getRecentConversation().
+// Passing it is what lets a bare "under 300000" or "yes please" be understood
+// at all — without it every message was classified in isolation.
+const extractSearchFilters = async (text, history = []) => {
+    const fallback = {
+        intent: 'unclear', language_request: null, message_language: null,
+        city: null, neighbourhood: null, type: null, price_max: null, bedrooms: null,
+    };
     if (!text || !text.trim()) return fallback;
 
     let knownLocations = [];
@@ -288,13 +338,17 @@ const extractSearchFilters = async (text) => {
         console.error('Failed to fetch known locations for NLU prompt, proceeding without them:', error.message);
     }
 
+    const conversationBlock = history.length
+        ? `RECENT CONVERSATION (oldest first):\n${formatHistoryForPrompt(history)}\n\n---\n\n`
+        : '';
+
     try {
         const response = await anthropic.messages.parse({
             model: NLU_MODEL,
             max_tokens: 400,
             temperature: 0,
             system: buildNluSystemPrompt(knownLocations),
-            messages: [{ role: 'user', content: text }],
+            messages: [{ role: 'user', content: `${conversationBlock}NEW MESSAGE FROM CUSTOMER:\n${text}` }],
             output_config: { format: zodOutputFormat(NLUSchema) },
         });
         const parsed = response.parsed_output;
@@ -319,11 +373,20 @@ const hasAnyFilter = (filters) =>
 // number — but may also decline, or describe the property instead of citing
 // a number, so this still goes through Claude rather than a bare regex.
 const ViewingSelectionSchema = z.object({
-    decision: z.enum(['decline', 'select', 'unclear']),
+    // 'wants_to_book' covers an enthusiastic yes that doesn't name a listing
+    // ("Yes I want to book an appointment!") — previously this landed in
+    // 'unclear' and the lead got "I didn't quite catch that", which reads as
+    // the bot ignoring a perfectly clear answer.
+    // 'new_search' matters more than it looks: after results are shown the
+    // lead is parked in the selection state, so a perfectly natural refinement
+    // ("actually under 400000", "show me apartments instead") was being read
+    // as an attempt to pick a listing. Detecting it lets the flow drop back
+    // into search instead of trapping them in the booking prompt.
+    decision: z.enum(['decline', 'select', 'wants_to_book', 'new_search', 'unclear']),
     selected_number: z.number().int().nullable(),
 });
 
-const extractViewingSelection = async (text, listingCount) => {
+const extractViewingSelection = async (text, listingCount, history = []) => {
     const fallback = { decision: 'unclear', selected_number: null };
     if (!text || !text.trim()) return fallback;
 
@@ -332,10 +395,15 @@ const extractViewingSelection = async (text, listingCount) => {
             model: NLU_MODEL,
             max_tokens: 200,
             temperature: 0,
-            system: `The user was just shown a numbered list of ${listingCount} real estate properties (numbered 1 to ${listingCount}) and asked if they'd like to book a viewing, replying either with the number of the property they want or declining. Classify their reply.
-- decision: "decline" if they say no / not interested / not now. "select" if they clearly indicate exactly one property, by number or by an unambiguous description matching one listing's position in the list. "unclear" otherwise (e.g. they asked something unrelated instead of answering).
-- selected_number: the 1-based number of the property they selected, only when decision is "select" — must be between 1 and ${listingCount}. null otherwise.`,
-            messages: [{ role: 'user', content: text }],
+            system: `The user was just shown a numbered list of ${listingCount} real estate properties (numbered 1 to ${listingCount}) and asked if they'd like to book a viewing. Classify their reply.
+- decision:
+  * "select" — they clearly indicate exactly ONE property, by number or by an unambiguous description matching one listing's position ("the second one", "the villa in Bè").
+  * "wants_to_book" — they clearly want to book but have NOT said which property ("yes", "yes I want to book an appointment", "oui je veux visiter"). An enthusiastic yes is NOT unclear.
+  * "new_search" — they are changing or refining what they're looking for rather than picking from the list ("actually under 400000", "do you have apartments instead?", "what about Bè?", "something cheaper"). This is a NEW requirement, not a selection.
+  * "decline" — no / not interested / not now.
+  * "unclear" — only if none of the above fit (e.g. they asked something unrelated instead of answering).
+- selected_number: the 1-based number they selected, only when decision is "select" — must be between 1 and ${listingCount}. null otherwise.`,
+            messages: [{ role: 'user', content: `${history.length ? `RECENT CONVERSATION (oldest first):\n${formatHistoryForPrompt(history)}\n\n---\n\n` : ''}CUSTOMER'S REPLY:\n${text}` }],
             output_config: { format: zodOutputFormat(ViewingSelectionSchema) },
         });
         return response.parsed_output ?? fallback;
@@ -417,11 +485,11 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
         return BOT_STRINGS.welcome_clarify[lang];
     }
 
-    const selection = await extractViewingSelection(text, pendingListingIds.length);
+    const selection = await extractViewingSelection(text, pendingListingIds.length, history);
 
     if (selection.decision === 'decline') {
         await clearPendingAction(leadId);
-        return BOT_STRINGS.booking_declined[lang];
+        return composeBookingDeclined({ lang, history });
     }
 
     if (
@@ -432,20 +500,38 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
     ) {
         const propertyId = pendingListingIds[selection.selected_number - 1];
         await setPendingViewingDatetime(leadId, propertyId);
-        return BOT_STRINGS.ask_datetime[lang];
+        const property = await getPropertyById(propertyId);
+        const propertyLabel = property
+            ? `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`
+            : '';
+        return composeAskDatetime({ lang, propertyLabel, history });
     }
 
-    // Unclear — keep the pending state as-is and ask again.
-    return BOT_STRINGS.booking_selection_unclear[lang];
+    // They clearly want to book but didn't say which one — that's a normal
+    // answer, not a misunderstanding. Keep the pending state and ask which.
+    if (selection.decision === 'wants_to_book') {
+        return composeBookingPrompt({ lang, listingCount: pendingListingIds.length, history });
+    }
+
+    // Not a selection at all — they're refining what they want. Drop the
+    // booking state and signal the caller to run a fresh search instead of
+    // trapping them in "which number?".
+    if (selection.decision === 'new_search') {
+        await clearPendingAction(leadId);
+        return null;
+    }
+
+    // Genuinely couldn't tell which listing they meant.
+    return composeSelectionUnclear({ lang, userMessage: text, listingCount: pendingListingIds.length, history });
 };
 
 // ── Booking flow, step 2: their preferred date/time ──
-const handleViewingDateTimeReply = async ({ leadId, propertyId, text, lang }) => {
+const handleViewingDateTimeReply = async ({ leadId, propertyId, text, lang, history }) => {
     const result = await extractAppointmentDateTime(text);
 
     if (result.decision === 'decline') {
         await clearPendingAction(leadId);
-        return BOT_STRINGS.booking_declined[lang];
+        return composeBookingDeclined({ lang, history });
     }
 
     await createAppointment({
@@ -463,7 +549,9 @@ const handleViewingDateTimeReply = async ({ leadId, propertyId, text, lang }) =>
         ? `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`
         : '';
 
-    return `${BOT_STRINGS.booking_confirmed[lang]}\n${propertyLabel}\n${text}`;
+    // Wrapper is composed; the factual recap underneath stays deterministic.
+    const confirmation = await composeBookingConfirmed({ lang, history });
+    return `${confirmation}\n\n${propertyLabel}\n${text}`;
 };
 
 // Sends the reply, saves it to the conversation log, and swallows its own
@@ -518,6 +606,13 @@ const handleMessage = async (req, res) => {
 
         const existingLeadState = await getLeadState(to);
 
+        // The bot's short-term memory. Loaded BEFORE the lead row is touched
+        // so the current message isn't in it yet — history is strictly "what
+        // was said before now".
+        const history = existingLeadState
+            ? await getRecentConversation(existingLeadState.id, HISTORY_TURNS)
+            : [];
+
         // Non-text message (image, sticker, voice note, ...) — we can't read
         // it, but it's still a real contact: log it and reply.
         //
@@ -535,23 +630,30 @@ const handleMessage = async (req, res) => {
             return res.sendStatus(200);
         }
 
-        // An explicit "reply in English please" beats everything below — it's
-        // often a SHORT message and can arrive mid-booking, which are exactly
-        // the two cases where we otherwise ignore the message's own language.
-        const languageSwitchRequest = detectLanguageSwitchRequest(text);
+        // Free regex fast path for the unambiguous phrasings ("english",
+        // "en français"). It's deliberately NOT the only mechanism — it misses
+        // natural wordings like "now please english", which is why the NLU
+        // below also reports language_request.
+        const regexSwitchRequest = detectLanguageSwitchRequest(text);
 
-        // Short replies ("ok", "oui", "1", "yes please") and mid-booking-flow
-        // slot-fills aren't reliable language signals — detection on two words
-        // flips languages at random. Trust the lead's established language in
-        // those cases and only re-detect on a substantial message.
+        // Mid-booking replies are slot-fills ("1", "tomorrow 11am") and go to
+        // the dedicated booking NLUs, so the general understanding call is
+        // skipped there — no wasted round-trip.
+        const inPendingFlow = Boolean(existingLeadState?.pendingAction);
+        let understanding = inPendingFlow ? null : await extractSearchFilters(text, history);
+
+        // Language precedence: an explicit request (however phrased) wins;
+        // then, for short/mid-flow messages, the established language (two
+        // words are not a reliable signal — that unreliability is what caused
+        // the original FR/EN flip-flopping); then the message's own language.
         const wordCount = text.split(/\s+/).filter(Boolean).length;
-        const hasReliableLanguageSignal = wordCount > 3;
+        const languageSwitchRequest = regexSwitchRequest || understanding?.language_request || null;
         if (languageSwitchRequest) {
             lang = languageSwitchRequest;
-        } else if (existingLeadState && (existingLeadState.pendingAction || !hasReliableLanguageSignal)) {
+        } else if (existingLeadState && (inPendingFlow || wordCount <= 3)) {
             lang = existingLeadState.language;
         } else {
-            lang = await detectLanguage(text);
+            lang = understanding?.message_language || existingLeadState?.language || await detectLanguage(text);
         }
 
         const lead = await getOrCreateLead(to, contactName, lang);
@@ -567,33 +669,56 @@ const handleMessage = async (req, res) => {
                 text,
                 lang,
                 pendingListingIds: lead.pendingListingIds,
+                history,
             });
+            // null = "this wasn't a selection, they're searching again".
+            // Load the understanding we skipped and fall through to search.
+            if (replyBody === null) {
+                understanding = await extractSearchFilters(text, history);
+            }
+        }
+
+        if (replyBody !== undefined && replyBody !== null) {
+            // already handled by the booking flow above
         } else if (lead.pendingAction === 'awaiting_viewing_datetime') {
             replyBody = await handleViewingDateTimeReply({
                 leadId,
                 propertyId: lead.pendingPropertyId,
                 text,
                 lang,
+                history,
             });
         } else {
-            const filters = await extractSearchFilters(text);
+            const filters = understanding;
 
             if (languageSwitchRequest && filters.intent !== 'search') {
                 // They only asked to change language — confirm in the NEW
-                // language and invite a requirement, rather than treating
-                // "in English please" as an off-topic message or dumping
-                // listings at them. A switch bundled WITH a request
-                // ("show me villas in english") falls through to the search
-                // below, which now renders in the new language anyway.
-                replyBody = await composeLanguageSwitch({ lang });
+                // language, rather than treating "now please english" as
+                // off-topic or dumping listings at them. A switch bundled WITH
+                // a request ("show me villas in english") falls through to the
+                // search below, which renders in the new language anyway.
+                replyBody = await composeLanguageSwitch({ lang, history });
+                isGreetingReply = true;
+            } else if (filters.intent === 'closing') {
+                // "Thank you" / "merci" / "ok bye". Must NOT be answered with a
+                // welcome — that was the most robotic-looking failure in
+                // testing (thanking the bot after booking got a full greeting).
+                const justBooked = history.some((m) => m.sender === 'bot' && m.message.includes(BOT_STRINGS.booking_confirmed[lang]))
+                    || Boolean(existingLeadState && !existingLeadState.pendingAction && history.length > 2);
+                replyBody = await composeClosing({ lang, userMessage: text, history, justBooked });
+                isGreetingReply = true;
+            } else if (filters.intent === 'booking_intent') {
+                // They want to book but no listings are pending — they haven't
+                // been shown anything yet, so find out what they want first.
+                replyBody = await composeGreeting({ lang, userMessage: text, isNewLead: lead.isNew, history });
                 isGreetingReply = true;
             } else if (filters.intent === 'off_topic') {
-                replyBody = await composeOffTopic({ lang, userMessage: text });
+                replyBody = await composeOffTopic({ lang, userMessage: text, history });
             } else if (filters.intent === 'greeting') {
                 // A pure greeting with no property information — welcome them
                 // and invite a requirement. Already a full welcome on its own,
                 // so it never gets the welcome_prefix below.
-                replyBody = await composeGreeting({ lang, userMessage: text, isNewLead: lead.isNew });
+                replyBody = await composeGreeting({ lang, userMessage: text, isNewLead: lead.isNew, history });
                 isGreetingReply = true;
             } else {
                 // Real intent, even if vague ("anything cheap?"). An empty
@@ -610,13 +735,13 @@ const handleMessage = async (req, res) => {
                 const { listings, relaxed } = await searchPropertiesWithFallback(searchFilters);
 
                 if (listings.length === 0) {
-                    replyBody = await composeNoResults({ lang, userMessage: text });
+                    replyBody = await composeNoResults({ lang, userMessage: text, history });
                 } else {
                     // Claude writes ONLY the intro line; the listing cards and
                     // the booking prompt stay template-rendered so no price or
                     // property detail can ever be model-invented.
                     const intro = await composeResultsIntro({
-                        lang, userMessage: text, listings, relaxed, filters: searchFilters,
+                        lang, userMessage: text, listings, relaxed, filters: searchFilters, history,
                     });
                     replyBody = `${intro}\n\n${formatListingsBody(listings, lang)}\n\n${BOT_STRINGS.booking_prompt[lang]}`;
                     // Remember which listings were shown (in the same numbered

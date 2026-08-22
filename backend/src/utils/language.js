@@ -118,6 +118,10 @@ const BOT_STRINGS = {
         fr: "C'est noté ! Votre demande de visite a été enregistrée pour :",
         en: "Got it! Your viewing request has been saved for:",
     },
+    closing: {
+        fr: "Avec plaisir ! N'hésitez pas à m'écrire si vous avez besoin d'autre chose.",
+        en: "You're welcome! Feel free to message me any time if you need anything else.",
+    },
     language_switched: {
         fr: "Bien sûr, je continue en français. Que recherchez-vous ?",
         en: "Of course, I'll continue in English. What are you looking for?",

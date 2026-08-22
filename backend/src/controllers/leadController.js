@@ -80,6 +80,25 @@ const saveConversationMessage = async (leadId, sender, message) => {
     );
 };
 
+// ── getRecentConversation(leadId, limit) ──
+// The bot's short-term memory. The transcript has always been written here;
+// nothing read it back, which is why the bot re-greeted people mid-chat and
+// forgot what they'd already told it.
+//
+// Media placeholders ("[photo sent: https://...]") are filtered out — they're
+// bookkeeping for the dashboard, not conversation, and the URLs would burn a
+// lot of tokens for no benefit. Returned oldest-first, ready to feed a prompt.
+const getRecentConversation = async (leadId, limit = 10) => {
+    const result = await pool.query(
+        `SELECT sender, message FROM conversations
+         WHERE lead_id = $1 AND message NOT LIKE '[%sent:%'
+         ORDER BY created_at DESC, id DESC
+         LIMIT $2`,
+        [leadId, limit]
+    );
+    return result.rows.reverse();
+};
+
 // ── Booking-flow pending state ──
 // A lead has at most one active pending flow. These three functions are the
 // only place that state is written — set when a numbered list of listings
@@ -285,6 +304,7 @@ module.exports = {
     getOrCreateLead,
     getLeadState,
     saveConversationMessage,
+    getRecentConversation,
     setPendingViewingSelection,
     setPendingViewingDatetime,
     clearPendingAction,
