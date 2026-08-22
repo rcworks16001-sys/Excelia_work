@@ -7,6 +7,10 @@ const { zodOutputFormat } = require('@anthropic-ai/sdk/helpers/zod');
 const pool = require('../db/index');
 const { searchPropertiesWithFallback, getPropertyById, getKnownLocations } = require('./propertyController');
 const {
+    getProfile, mergeProfile, recordShownListings, recordInterest, profileToSearchFilters,
+} = require('./leadProfileController');
+const { ACTIONS, nextBestAction } = require('../utils/nextBestAction');
+const {
     composeResultsIntro,
     composeNoResults,
     composeGreeting,
@@ -263,6 +267,28 @@ const NLUSchema = z.object({
     // enquiries here are rentals and guessing 'sale' from an ambiguous
     // message would filter the catalogue down to two land plots.
     transaction: z.enum(['rent', 'sale']).nullable(),
+
+    // ── Profile fields: remembered across turns, not just this search ──
+    // The most they'd stretch to, when they say so ("I could go to 90"). Kept
+    // apart from price_max because it is a different promise: price_max is an
+    // estimate we may nudge, this is a wall they named themselves.
+    budget_stretch_max: z.number().int().nullable(),
+    // "2 or 3 bedrooms" is a range that a single bedrooms field cannot hold.
+    bedrooms_min: z.number().int().nullable(),
+    bedrooms_max: z.number().int().nullable(),
+    purpose: z.enum(['self_use', 'investment', 'rental_income']).nullable(),
+    timeline: z.enum(['immediate', 'within_1_month', 'within_3_months', 'later', 'exploring']).nullable(),
+
+    // ── Retraction ──
+    // The third state. In JSON, "they didn't mention their budget" and "they
+    // told me to forget their budget" are both null, so the difference has to
+    // be carried out of band or the profile becomes a ratchet that can only
+    // ever accumulate constraints. See mergeProfile in leadProfileController.
+    cleared_fields: z.array(z.enum([
+        'transaction', 'property_type', 'city', 'neighbourhood',
+        'bedrooms_min', 'bedrooms_max', 'budget_max', 'budget_stretch_max',
+        'purpose', 'timeline',
+    ])),
 });
 
 // Builds the NLU system prompt, optionally injecting the list of known
@@ -273,7 +299,7 @@ const NLUSchema = z.object({
 // even though a matching listing existed. knownLocations is
 // [{ city, neighbourhood }, ...] from propertyController.getKnownLocations();
 // pass [] to fall back to the plain prompt (e.g. if that query fails).
-const buildNluSystemPrompt = (knownLocations = []) => {
+const buildNluSystemPrompt = (knownLocations = [], profile = null) => {
     const neighbourhoodsByCity = {};
     for (const { city, neighbourhood } of knownLocations) {
         if (!city || !neighbourhood) continue;
@@ -289,6 +315,34 @@ const buildNluSystemPrompt = (knownLocations = []) => {
     const locationGuidance = locationLines
         ? `\n\nKnown cities and their neighbourhoods currently in our listings — use this to tell a neighbourhood apart from a city (a name listed under a city below is a NEIGHBOURHOOD, not a city, even if the message doesn't mention the city at all):\n${locationLines}\n\nIf the message names a neighbourhood from this list, set "neighbourhood" to it and set "city" to the city it's listed under, even if the user didn't say the city. If a place name isn't in this list, use your best judgment.`
         : '';
+
+    // What we already know about this lead, stated as fact so the model reports
+    // only what CHANGED. This replaced an instruction telling it to re-read the
+    // transcript and repeat any earlier values it found. Both together would be
+    // two competing memories: the transcript one sees a 10-row window, the
+    // profile sees everything, and once they disagree the re-derived value
+    // silently overwrites the older, better one. Exactly one source of truth.
+    const known = profile
+        ? Object.entries({
+            transaction: profile.transaction,
+            property_type: profile.property_type,
+            city: profile.city,
+            neighbourhood: profile.neighbourhood,
+            bedrooms_min: profile.bedrooms_min,
+            bedrooms_max: profile.bedrooms_max,
+            price_max: profile.budget_max,
+            budget_stretch_max: profile.budget_stretch_max,
+            purpose: profile.purpose,
+            timeline: profile.timeline,
+        }).filter(([, v]) => v !== null && v !== undefined)
+        : [];
+
+    const profileBlock = known.length
+        ? `WHAT YOU ALREADY KNOW ABOUT THIS CUSTOMER (established over previous messages — this is already saved, you do NOT need to repeat it):
+${known.map(([k, v]) => `- ${k}: ${v}`).join('\n')}
+
+Report ONLY what this new message ADDS or CHANGES. If a field above is unchanged, set it to null — null means "no change", not "forget it". To actually drop one, list it in cleared_fields.`
+        : `Nothing is known about this customer yet — this is the start of their requirement.`;
 
     return `You are the natural-language-understanding engine for EXCELIA, a WhatsApp real estate chatbot for Togo. Read the incoming WhatsApp message (French or English — understand both) and classify it.
 
@@ -315,11 +369,13 @@ Field guidance:
 - price_max: the user's stated maximum budget as a plain integer number of XOF, with no currency symbol, spaces, or separators (e.g. "45000", "45 000 F CFA", "45k" -> 45000). Treat any stated budget as the maximum. null if no budget given.
 - bedrooms: integer number of bedrooms/chambres mentioned. null if not mentioned.
 - transaction: "rent" or "sale", ONLY when the customer actually signals which they want. "louer", "à louer", "rent", "renting", "monthly" -> "rent". "acheter", "à vendre", "buy", "purchase", "own" -> "sale". Land ("terrain", "parcelle") is normally bought, so a bare request for a terrain implies "sale". Otherwise null — most enquiries are rentals and an unfounded "sale" guess would wrongly rule out almost the whole catalogue.
+- budget_stretch_max: set ONLY when they signal flexibility ABOVE their stated budget — "I could stretch to 90", "maximum 90 but ideally 80", "je peux aller jusqu'à 90". The stated/preferred figure goes in price_max, the upper limit here. If they name a single firm number, leave this null.
+- bedrooms_min / bedrooms_max: use when they give a RANGE ("2 or 3 bedrooms", "at least 3", "entre 2 et 4"). For a single number, set both to that number. null if bedrooms were not mentioned.
+- purpose: "self_use" (to live in), "investment" (to resell/appreciate), "rental_income" (to rent out). null unless they say so.
+- timeline: "immediate", "within_1_month", "within_3_months", "later", or "exploring" (just browsing, no timeframe). null unless they indicate one.
+- cleared_fields: list any field the customer has EXPLICITLY told you to drop or stop applying — "forget the budget", "anywhere is fine now", "actually never mind the area", "peu importe le quartier". This is ONLY for a deliberate retraction. Simply not mentioning a field in this message is NOT a retraction — leave it out of this list and set that field to null. Almost always an empty array.
 
-CRITICAL — CARRY FORWARD WHAT THEY ALREADY TOLD YOU:
-The customer builds their requirement up across several messages. For every filter field, if the NEW message does not mention it but an EARLIER message in the conversation did, repeat that earlier value. Only use null when neither the new message nor the conversation ever mentioned it.
-Example: "I want a villa in Lomé" then "under 300000" must produce city "Lomé", type "villa" AND price_max 300000 — not price alone.
-The exception is an explicit change of mind ("actually, a apartment instead"), where the new value replaces the old one.
+${profileBlock}
 
 Never fabricate a value neither the message nor the conversation supports. When genuinely uncertain about a field, use null rather than guessing.`;
 };
@@ -333,10 +389,15 @@ const formatHistoryForPrompt = (history = []) =>
 // `history` is the last few turns (oldest first) from getRecentConversation().
 // Passing it is what lets a bare "under 300000" or "yes please" be understood
 // at all — without it every message was classified in isolation.
-const extractSearchFilters = async (text, history = []) => {
+// `profile` is the lead's stored requirement (leadProfileController) — passed
+// so the model reports only what CHANGED rather than re-deriving everything
+// from a 10-row transcript window each turn.
+const extractSearchFilters = async (text, history = [], profile = null) => {
     const fallback = {
         intent: 'unclear', language_request: null, message_language: null,
         city: null, neighbourhood: null, type: null, price_max: null, bedrooms: null, transaction: null,
+        budget_stretch_max: null, bedrooms_min: null, bedrooms_max: null,
+        purpose: null, timeline: null, cleared_fields: [],
     };
     if (!text || !text.trim()) return fallback;
 
@@ -354,14 +415,25 @@ const extractSearchFilters = async (text, history = []) => {
     try {
         const response = await anthropic.messages.parse({
             model: NLU_MODEL,
-            max_tokens: 400,
+            // Raised from 400 with the profile fields. A truncated response
+            // fails to parse and falls back to intent 'unclear' with every
+            // filter null — i.e. the lead's entire message is silently thrown
+            // away. Cheap insurance against a failure mode that looks like the
+            // bot simply not understanding.
+            max_tokens: 800,
             temperature: 0,
-            system: buildNluSystemPrompt(knownLocations),
+            system: buildNluSystemPrompt(knownLocations, profile),
             messages: [{ role: 'user', content: `${conversationBlock}NEW MESSAGE FROM CUSTOMER:\n${text}` }],
             output_config: { format: zodOutputFormat(NLUSchema) },
         });
         const parsed = response.parsed_output;
-        if (!parsed) return fallback;
+        if (!parsed) {
+            // Distinct from the catch below: the call SUCCEEDED but produced
+            // nothing usable (almost always truncation). Logged separately so
+            // the two are not confused when diagnosing.
+            console.error('NLU returned no parsed output (possible truncation) for message:', text.slice(0, 80));
+            return fallback;
+        }
 
         // Defensive: collapse empty-string extraction to null.
         const cleanStr = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
@@ -600,6 +672,10 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
         const property = await getPropertyById(propertyId);
         if (property) {
             await setPendingViewingSelection(leadId, [propertyId]);
+            // Saying they like one is a real preference signal — record it
+            // here, from the booking NLU's own output, rather than running a
+            // second understanding call mid-flow just to learn the same thing.
+            await recordInterest(leadId, propertyId, { liked: true });
             const propertyLabel = `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`;
             return { text: await composeConfirmBooking({ lang, propertyLabel, history }), mediaListings: null };
         }
@@ -613,6 +689,8 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
     ) {
         const propertyId = pendingListingIds[selection.selected_number - 1];
         await setPendingViewingDatetime(leadId, propertyId);
+        // Choosing one to view is the strongest interest signal there is.
+        await recordInterest(leadId, propertyId, { liked: true });
         const property = await getPropertyById(propertyId);
         const propertyLabel = property
             ? `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`
@@ -767,6 +845,13 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
             ? await getRecentConversation(existingLeadState.id, HISTORY_TURNS)
             : [];
 
+        // Long-term memory: everything this lead has ever told us about what
+        // they want, as structured data. The transcript above is a 10-row
+        // window; this is not.
+        const existingProfile = existingLeadState
+            ? await getProfile(existingLeadState.id)
+            : null;
+
         // Non-text message (image, sticker, voice note, ...) — we can't read
         // it, but it's still a real contact: log it and reply.
         //
@@ -793,8 +878,17 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
         // Mid-booking replies are slot-fills ("1", "tomorrow 11am") and go to
         // the dedicated booking NLUs, so the general understanding call is
         // skipped there — no wasted round-trip.
+        //
+        // Kept deliberately, despite the profile now existing. Running the
+        // general NLU here too would add a second Claude call on the most
+        // latency-sensitive path, re-expose the FR/EN flip-flopping that the
+        // short-message guard below was written to stop, and — worst — let a
+        // slot-fill like "1" or "tomorrow 11am" hallucinate filters that then
+        // get merged into the saved profile. The profile is updated mid-flow
+        // from the booking NLU's own output instead (see below), which needs
+        // no extra call.
         const inPendingFlow = Boolean(existingLeadState?.pendingAction);
-        let understanding = inPendingFlow ? null : await extractSearchFilters(text, history);
+        let understanding = inPendingFlow ? null : await extractSearchFilters(text, history, existingProfile);
 
         // Language precedence: an explicit request (however phrased) wins;
         // then, for short/mid-flow messages, the established language (two
@@ -828,7 +922,7 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
             // null = "this wasn't a selection, they're searching again".
             // Load the understanding we skipped and fall through to search.
             if (selectionResult === null) {
-                understanding = await extractSearchFilters(text, history);
+                understanding = await extractSearchFilters(text, history, existingProfile);
             } else {
                 replyBody = selectionResult.text;
                 // They asked to see more of a listing — resend its media after
@@ -853,7 +947,41 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
         } else {
             const filters = understanding;
 
-            if (languageSwitchRequest && filters.intent !== 'search') {
+            // Everything the lead has told us, merged into one durable picture:
+            // what they said before, plus whatever this message added or
+            // retracted. Written BEFORE the search so the search runs against
+            // the full requirement rather than just this message's fragment —
+            // "under 300000" now searches villas in Lomé under 300000, because
+            // the villa and the Lomé came from previous turns.
+            await mergeProfile(leadId, {
+                deltas: {
+                    transaction: filters.transaction,
+                    property_type: filters.type,
+                    city: filters.city,
+                    neighbourhood: filters.neighbourhood,
+                    // A single stated bedroom count fills both ends of the range.
+                    bedrooms_min: filters.bedrooms_min ?? filters.bedrooms,
+                    bedrooms_max: filters.bedrooms_max ?? filters.bedrooms,
+                    budget_max: filters.price_max,
+                    budget_stretch_max: filters.budget_stretch_max,
+                    purpose: filters.purpose,
+                    timeline: filters.timeline,
+                },
+                clearedFields: filters.cleared_fields || [],
+            });
+            const profile = await getProfile(leadId);
+
+            // ONE decision, made in code. See utils/nextBestAction.js — the
+            // rule ordering is the bot's goal hierarchy, and keeping it out of
+            // a prompt is what makes it exhaustively testable.
+            const { action } = nextBestAction({
+                pendingAction: null, // pending flows were already handled above
+                intent: filters.intent,
+                languageSwitchRequest,
+                profile,
+            });
+
+            if (action === ACTIONS.SWITCH_LANGUAGE) {
                 // They only asked to change language — confirm in the NEW
                 // language, rather than treating "now please english" as
                 // off-topic or dumping listings at them. A switch bundled WITH
@@ -861,7 +989,7 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                 // search below, which renders in the new language anyway.
                 replyBody = await composeLanguageSwitch({ lang, history });
                 isGreetingReply = true;
-            } else if (filters.intent === 'closing') {
+            } else if (action === ACTIONS.CLOSE) {
                 // "Thank you" / "merci" / "ok bye". Must NOT be answered with a
                 // welcome — that was the most robotic-looking failure in
                 // testing (thanking the bot after booking got a full greeting).
@@ -869,32 +997,28 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                     || Boolean(existingLeadState && !existingLeadState.pendingAction && history.length > 2);
                 replyBody = await composeClosing({ lang, userMessage: text, history, justBooked });
                 isGreetingReply = true;
-            } else if (filters.intent === 'booking_intent') {
+            } else if (action === ACTIONS.ASK_WHAT_THEY_WANT) {
                 // They want to book but no listings are pending — they haven't
                 // been shown anything yet, so find out what they want first.
                 replyBody = await composeGreeting({ lang, userMessage: text, isNewLead: lead.isNew, history });
                 isGreetingReply = true;
-            } else if (filters.intent === 'off_topic') {
+            } else if (action === ACTIONS.ANSWER_OFF_TOPIC) {
                 replyBody = await composeOffTopic({ lang, userMessage: text, history });
-            } else if (filters.intent === 'greeting') {
+            } else if (action === ACTIONS.GREET) {
                 // A pure greeting with no property information — welcome them
                 // and invite a requirement. Already a full welcome on its own,
                 // so it never gets the welcome_prefix below.
                 replyBody = await composeGreeting({ lang, userMessage: text, isNewLead: lead.isNew, history });
                 isGreetingReply = true;
             } else {
-                // Real intent, even if vague ("anything cheap?"). An empty
-                // filter set is NOT a reason to re-greet someone who just
-                // asked a genuine question — fall through to the search,
+                // SEARCH_AND_SHOW. Real intent, even if vague ("anything
+                // cheap?"). An empty filter set is NOT a reason to re-greet
+                // someone who just asked a genuine question — search anyway,
                 // which with no filters returns the cheapest listings.
-                const searchFilters = {
-                    city: filters.city,
-                    neighbourhood: filters.neighbourhood,
-                    type: filters.type,
-                    price_max: filters.price_max,
-                    bedrooms: filters.bedrooms,
-                    transaction: filters.transaction,
-                };
+                //
+                // Filters come from the PROFILE, not this one message, so a
+                // requirement built up over several turns is searched in full.
+                const searchFilters = profileToSearchFilters(profile);
                 const { listings, relaxed } = await searchPropertiesWithFallback(searchFilters);
 
                 if (listings.length === 0) {
@@ -910,6 +1034,7 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                     // Remember which listings were shown (in the same numbered
                     // order) so a reply like "2" resolves to a specific property.
                     await setPendingViewingSelection(leadId, listings.map((p) => p.id));
+                    await recordShownListings(leadId, listings.map((p) => p.id));
                     listingsShown = listings;
                 }
             }

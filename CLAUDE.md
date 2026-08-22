@@ -208,6 +208,46 @@ Each message type is a separate API call. To send a listing: text card first, th
 
 The bot went through several rounds of real bugs found via live testing, and the architecture is now meaningfully different from a simple "extract filters → search → reply" pipeline. Understand this before changing anything in `webhookController.js`, `utils/replyComposer.js`, or `utils/language.js`.
 
+### The lead profile is the bot's real memory (added in the rearchitecture)
+`lead_profiles` (1:1 with `leads`, owned solely by `leadProfileController.js`) stores what the lead
+actually wants as **structured data**: transaction, type, city/neighbourhood, bedroom range, budget +
+stretch, purpose, timeline, liked/rejected property ids, last shown listings. It is written every turn
+*before* the search runs, and the search filters come from the **profile**, not from the current
+message — which is what lets "under 400000" search villas-in-Lomé-to-rent when the villa and the Lomé
+were said ten messages ago.
+
+**Rules that must not be broken here:**
+- **The merge has THREE states, not two** (`mergeProfile`): not mentioned → keep; mentioned →
+  overwrite; **explicitly retracted → NULL**. In JSON the first and third are both `null`, so the NLU
+  reports retractions out of band via `cleared_fields`. Collapsing these turns the profile into a
+  ratchet — a lead who says "forget the budget" keeps it forever and every later search silently
+  excludes exactly what they asked for. There is a smoke scenario for precisely this.
+- **There is exactly ONE memory of the requirement.** The old prompt instruction telling the model to
+  re-read the transcript and repeat earlier values was **deleted** when the profile landed. Do not
+  reintroduce it: the transcript sees a 10-row window and the profile sees everything, so once they
+  disagree the re-derived (worse) value overwrites the stored one. The profile is injected into the
+  NLU prompt as "what you already know"; the model reports only deltas.
+- **`budget_stretch_max` is a number, never a boolean.** It becomes `price_ceiling`, an *absolute*
+  ceiling that skips the 10% `PRICE_TOLERANCE` applied to `price_max` — the lead already told us their
+  limit, so nudging it further shows them what they explicitly ruled out.
+- Pending booking state expires after `PENDING_STATE_TTL_HOURS` (24h). The check is duplicated in
+  `getOrCreateLead` and `getLeadState` and **they must stay identical** — routing reads one and the
+  NLU-skip decision reads the other, so a mismatch would run a fresh search *and* route the reply into
+  the booking handler.
+
+### Decisions are made in code, not in a prompt (`utils/nextBestAction.js`)
+An ordered list of rules, first match wins; the ordering **is** the goal hierarchy. Pure and
+synchronous — no DB, no `await`, no `Date.now()` — which is what lets smoke-bot cover the whole
+decision space instantly.
+
+- **`protect_active_booking` is always rule #1.** Nothing outranks an in-progress booking, and the
+  booking handlers remain the only code allowed to call `clearPendingAction`. This is the invariant
+  that has broken twice; there is a smoke assertion that no intent can leak past it.
+- Add behaviour by **inserting a rule**, not by growing a conditional. Every action must map to a
+  distinct branch — if two intents produce the same action, they are one intent.
+- Never extract a field nothing consumes. An unused schema field degrades extraction of the fields
+  that matter (this is why emotion/objection are deferred until something branches on them).
+
 ### The bot has conversation memory
 `getRecentConversation(leadId, 10)` (in `leadController.js`) reads the last 10 turns from `conversations` — the table was always being written to, but nothing read it back until this was added. It's fed into **both** the understanding call and every composer. Without this the bot was stateless per message and visibly broken:
 - `"Thank you"` was classified as a greeting and answered with a full welcome message.

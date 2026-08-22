@@ -60,7 +60,8 @@ const describeRelaxation = (relaxed, filters) => {
             : 'being for rent (these are for sale)');
     }
     if (relaxed.includes('city') && filters.city) parts.push(`the city "${filters.city}"`);
-    if (relaxed.includes('price_max') && filters.price_max) parts.push(`their stated budget`);
+    if ((relaxed.includes('price_max') && filters.price_max)
+        || (relaxed.includes('price_ceiling') && filters.price_ceiling)) parts.push(`their stated budget`);
     if (parts.length === 0) return '';
     return `IMPORTANT: there was no exact match. You had to widen the search — these results do NOT match ${parts.join(' and ')}. Acknowledge this honestly and briefly in your opening line, so the customer is not misled into thinking these are exact matches.`;
 };

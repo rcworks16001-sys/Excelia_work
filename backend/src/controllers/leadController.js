@@ -1,5 +1,15 @@
 const pool = require('../db/index');
 
+// A booking conversation that has gone cold is worse than no booking
+// conversation: without an expiry, a lead who stops replying while being asked
+// for a date stays parked in 'awaiting_viewing_datetime' indefinitely, and
+// their "bonjour" three days later gets read as a viewing time for a property
+// they have long since forgotten. 24 hours mirrors WhatsApp's own session
+// window — past that, treat them as starting fresh.
+//
+// Applied identically in getOrCreateLead and getLeadState; they must agree.
+const PENDING_STATE_TTL_HOURS = 24;
+
 // ── getOrCreateLead(phone, name, language) ──
 // The ONE place a lead is looked up or created. Returns
 // { id, isNew, pendingAction, pendingPropertyId, pendingListingIds } so the
@@ -10,13 +20,20 @@ const pool = require('../db/index');
 // name with a missing one (COALESCE keeps the existing name if the new
 // value is null — WhatsApp doesn't always include a profile name).
 const getOrCreateLead = async (phone, name, language) => {
+    // The expiry check MUST match getLeadState's. Routing reads pendingAction
+    // from here while the decision to skip the general NLU reads it from
+    // getLeadState — if only one of them expired stale state, the bot would
+    // run a fresh search AND still route the reply into the booking handler.
     const existing = await pool.query(
-        'SELECT id, pending_action, pending_property_id, pending_listing_ids FROM leads WHERE phone = $1',
-        [phone]
+        `SELECT id, pending_action, pending_property_id, pending_listing_ids,
+                (pending_set_at IS NOT NULL AND pending_set_at < now() - ($2 || ' hours')::interval) AS pending_expired
+           FROM leads WHERE phone = $1`,
+        [phone, String(PENDING_STATE_TTL_HOURS)]
     );
 
     if (existing.rows.length > 0) {
         const row = existing.rows[0];
+        const expired = row.pending_expired === true;
         // COALESCE on language too: callers pass null when the inbound message
         // carries NO reliable language signal (an image, a sticker, a bare
         // "ok"). Without this, one image would overwrite a known-English lead
@@ -28,9 +45,9 @@ const getOrCreateLead = async (phone, name, language) => {
         return {
             id: row.id,
             isNew: false,
-            pendingAction: row.pending_action,
-            pendingPropertyId: row.pending_property_id,
-            pendingListingIds: row.pending_listing_ids || [],
+            pendingAction: expired ? null : row.pending_action,
+            pendingPropertyId: expired ? null : row.pending_property_id,
+            pendingListingIds: expired ? [] : (row.pending_listing_ids || []),
         };
     }
 
@@ -56,18 +73,27 @@ const getOrCreateLead = async (phone, name, language) => {
 // null if this phone number has never contacted us.
 const getLeadState = async (phone) => {
     const result = await pool.query(
-        'SELECT id, language, pending_action, pending_property_id, pending_listing_ids FROM leads WHERE phone = $1',
-        [phone]
+        `SELECT id, language, pending_action, pending_property_id, pending_listing_ids,
+                pending_set_at,
+                (pending_set_at IS NOT NULL AND pending_set_at < now() - ($2 || ' hours')::interval) AS pending_expired
+           FROM leads WHERE phone = $1`,
+        [phone, String(PENDING_STATE_TTL_HOURS)]
     );
     if (result.rows.length === 0) return null;
 
     const row = result.rows[0];
+    // Expired state is reported as absent rather than deleted here: this is a
+    // read path, and a stale flag does no harm sitting in the row. The next
+    // search or booking step overwrites it anyway.
+    const expired = row.pending_expired === true;
+
     return {
         id: row.id,
         language: row.language,
-        pendingAction: row.pending_action,
-        pendingPropertyId: row.pending_property_id,
-        pendingListingIds: row.pending_listing_ids || [],
+        pendingAction: expired ? null : row.pending_action,
+        pendingPropertyId: expired ? null : row.pending_property_id,
+        pendingListingIds: expired ? [] : (row.pending_listing_ids || []),
+        pendingExpired: expired,
     };
 };
 
@@ -104,16 +130,19 @@ const getRecentConversation = async (leadId, limit = 10) => {
 // only place that state is written — set when a numbered list of listings
 // was just offered for booking, set again once they've picked one (now
 // awaiting a date/time), and cleared once the flow ends (booked or declined).
+// pending_set_at is stamped on every transition, not just the first — each step
+// of the booking flow restarts the clock, so an active back-and-forth never
+// expires mid-conversation (see PENDING_STATE_TTL_HOURS above).
 const setPendingViewingSelection = async (leadId, listingIds) => {
     await pool.query(
-        'UPDATE leads SET pending_action = $1, pending_listing_ids = $2, pending_property_id = NULL WHERE id = $3',
+        'UPDATE leads SET pending_action = $1, pending_listing_ids = $2, pending_property_id = NULL, pending_set_at = now() WHERE id = $3',
         ['awaiting_viewing_selection', listingIds, leadId]
     );
 };
 
 const setPendingViewingDatetime = async (leadId, propertyId) => {
     await pool.query(
-        'UPDATE leads SET pending_action = $1, pending_property_id = $2, pending_listing_ids = NULL WHERE id = $3',
+        'UPDATE leads SET pending_action = $1, pending_property_id = $2, pending_listing_ids = NULL, pending_set_at = now() WHERE id = $3',
         ['awaiting_viewing_datetime', propertyId, leadId]
     );
 };
@@ -122,7 +151,7 @@ const setPendingViewingDatetime = async (leadId, propertyId) => {
 // clearing the flow after createAppointment must be atomic with it.
 const clearPendingAction = async (leadId, client = pool) => {
     await client.query(
-        'UPDATE leads SET pending_action = NULL, pending_property_id = NULL, pending_listing_ids = NULL WHERE id = $1',
+        'UPDATE leads SET pending_action = NULL, pending_property_id = NULL, pending_listing_ids = NULL, pending_set_at = NULL WHERE id = $1',
         [leadId]
     );
 };
@@ -316,4 +345,5 @@ module.exports = {
     updateNotes,
     sendReply,
     VALID_STATUSES,
+    PENDING_STATE_TTL_HOURS,
 };

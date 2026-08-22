@@ -2,7 +2,9 @@ require('dotenv').config();
 const pool = require('../src/db/index');
 const wh = require('../src/controllers/webhookController');
 const { getLeadState } = require('../src/controllers/leadController');
+const { getProfile } = require('../src/controllers/leadProfileController');
 const { BOT_STRINGS } = require('../src/utils/language');
+const { RULES, nextBestAction, ACTIONS } = require('../src/utils/nextBestAction');
 
 // ── EXCELIA bot scenario suite ──
 // Run manually:  npm run smoke-bot
@@ -276,6 +278,83 @@ const run = async () => {
         check('did not flip an English lead to French', after.language === 'en', `language=${after.language}`);
         check('did not destroy pending booking state',
             after.pendingAction === 'awaiting_viewing_selection', `pending=${after.pendingAction}`);
+    });
+
+    // ── Scenarios 22-25: the lead profile and the decision engine ──
+
+    await scenario('PROFILE: a requirement built over several turns is stored, not re-derived', async (p) => {
+        await send(p, 'I am looking for a villa in Lome');
+        await send(p, 'under 400000');
+        const prof = await getProfile((await getLeadState(p)).id);
+        check('profile row written', Boolean(prof));
+        check('type remembered from turn 1', prof.property_type === 'villa', `type=${prof && prof.property_type}`);
+        check('city remembered from turn 1', prof.city === 'Lomé', `city=${prof && prof.city}`);
+        check('budget captured on turn 2', prof.budget_max === 400000, `budget=${prof && prof.budget_max}`);
+    });
+
+    await scenario('PROFILE: an explicit retraction clears the field (the ratchet bug)', async (p) => {
+        await send(p, 'I want an apartment in Lome under 100000');
+        const before = await getProfile((await getLeadState(p)).id);
+        check('budget was set first', before.budget_max === 100000, `budget=${before && before.budget_max}`);
+
+        await send(p, 'actually forget the budget, show me anything');
+        const after = await getProfile((await getLeadState(p)).id);
+        // The point: "forget X" must NULL it. If nulls were merely ignored the
+        // old budget would persist forever and quietly exclude what they just
+        // asked to see.
+        check('budget actually cleared', after.budget_max === null, `budget=${after && after.budget_max}`);
+        check('unrelated fields survived the retraction', after.city === 'Lomé', `city=${after && after.city}`);
+    });
+
+    await scenario('Stale pending booking state expires instead of trapping the lead', async (p) => {
+        await send(p, 'I want a villa');
+        const mid = await getLeadState(p);
+        check('is awaiting a selection', mid.pendingAction === 'awaiting_viewing_selection');
+
+        // Simulate the lead going quiet for two days.
+        await pool.query("UPDATE leads SET pending_set_at = now() - interval '48 hours' WHERE phone = $1", [p]);
+        const stale = await getLeadState(p);
+        check('expired state reads as absent', stale.pendingAction === null, `pending=${stale.pendingAction}`);
+        check('expiry is reported', stale.pendingExpired === true);
+
+        // Their next message must be treated as a fresh start, NOT parsed as a
+        // choice between listings they saw two days ago.
+        const r = await send(p, 'hello');
+        check('greeted rather than re-asked which property',
+            !/which|lequel|numéro|number/i.test(r.reply), r.reply);
+    });
+
+    await scenario('NBA: every rule is reachable and booking always wins', async () => {
+        // Pure and synchronous — no DB, no Claude, so the whole decision space
+        // runs instantly. A rule that can never fire is dead code pretending
+        // to be behaviour.
+        const hit = new Set();
+        const cases = [
+            { pendingAction: 'awaiting_viewing_datetime', intent: 'greeting' },
+            { pendingAction: null, intent: 'greeting', languageSwitchRequest: 'en' },
+            { pendingAction: null, intent: 'closing' },
+            { pendingAction: null, intent: 'booking_intent' },
+            { pendingAction: null, intent: 'off_topic' },
+            { pendingAction: null, intent: 'greeting' },
+            { pendingAction: null, intent: 'search' },
+            { pendingAction: null, intent: 'unclear' },
+        ];
+        for (const c of cases) hit.add(nextBestAction(c).rule);
+        const unreachable = RULES.map((r) => r.name).filter((n) => !hit.has(n));
+        check('no unreachable rules', unreachable.length === 0, `unreachable: ${unreachable.join(', ')}`);
+
+        // The invariant that has broken this project twice: nothing outranks an
+        // active booking. Not a greeting, not a language switch, not a search.
+        const intents = ['greeting', 'closing', 'off_topic', 'search', 'booking_intent', 'unclear'];
+        const leaks = intents.filter((intent) => nextBestAction({
+            pendingAction: 'awaiting_viewing_datetime', intent, languageSwitchRequest: 'en',
+        }).action !== ACTIONS.DELEGATE_BOOKING_FLOW);
+        check('an active booking outranks every other rule', leaks.length === 0, `leaked: ${leaks.join(', ')}`);
+
+        // 'unclear' must search, never re-greet — an empty filter set is not a
+        // reason to interrogate someone who asked a real question.
+        check('unclear falls through to search',
+            nextBestAction({ pendingAction: null, intent: 'unclear' }).action === ACTIONS.SEARCH_AND_SHOW);
     });
 
     console.log(`\n${'='.repeat(72)}`);

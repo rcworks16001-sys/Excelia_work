@@ -76,6 +76,15 @@ const buildQuery = (filters, limit) => {
         values.push(Math.round(price_max * PRICE_TOLERANCE));
         conditions.push(`price <= $${values.length}`);
     }
+    // An ABSOLUTE ceiling, with no tolerance added. Used when the lead has
+    // already told us the most they would stretch to ("I could go to 90") —
+    // that figure is their own limit, so nudging it another 10% would show
+    // them places they have explicitly ruled out. price_max keeps the
+    // tolerance because a bare "my budget is 80" is an estimate, not a wall.
+    if (filters.price_ceiling) {
+        values.push(Math.round(filters.price_ceiling));
+        conditions.push(`price <= $${values.length}`);
+    }
     // Bot-only contract (see searchPropertiesWithFallback) — never dropped by
     // its relaxation cascade, unlike every other filter above. searchProperties()
     // (the dashboard/exact-match contract) never sets this, so it still sees
@@ -133,13 +142,16 @@ const searchPropertiesWithFallback = async (filters = {}) => {
         { drop: ['neighbourhood', 'bedrooms', 'type'] },
         { drop: ['neighbourhood', 'bedrooms', 'type', 'transaction'] },
         { drop: ['neighbourhood', 'bedrooms', 'type', 'transaction', 'city'] },
-        { drop: ['neighbourhood', 'bedrooms', 'type', 'transaction', 'city', 'price_max'] },
+        // price_ceiling drops WITH price_max — they express the same constraint
+        // (see buildQuery), so relaxing one while keeping the other would leave
+        // the budget silently enforced by the survivor.
+        { drop: ['neighbourhood', 'bedrooms', 'type', 'transaction', 'city', 'price_max', 'price_ceiling'] },
     ];
 
     // A wide-open query ("anything cheap?") would otherwise return 10 full
     // listing cards — a wall of text in WhatsApp. Show a browsable handful
     // instead; the lead can narrow down from there.
-    const hasAnyFilter = ['city', 'neighbourhood', 'type', 'price_max', 'bedrooms', 'transaction']
+    const hasAnyFilter = ['city', 'neighbourhood', 'type', 'price_max', 'price_ceiling', 'bedrooms', 'transaction']
         .some((f) => filters[f] !== undefined && filters[f] !== null);
     const strictLimit = hasAnyFilter ? 10 : 5;
 

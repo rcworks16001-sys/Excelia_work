@@ -158,6 +158,76 @@ const runMigrations = async () => {
         // lead detail page, never touched by the bot.
         await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS notes TEXT;`);
 
+        // lead_profiles — what the bot actually KNOWS about a lead, as
+        // structured data rather than something re-derived from the transcript
+        // on every turn. Before this, extractSearchFilters produced a filter
+        // set, used it for one search and threw it away; "memory" was the model
+        // re-reading the last 10 rows of conversation, so anything said more
+        // than ~5 exchanges ago was gone for good and nothing was queryable.
+        //
+        // Discrete typed columns rather than one JSONB blob: the dashboard has
+        // to filter and sort on these ("show me every hot lead wanting a villa
+        // under 300k"), which is the whole point of storing them.
+        //
+        // ON DELETE CASCADE is load-bearing, not decoration — smoke-bot.js
+        // cleans up with `DELETE FROM leads WHERE phone = $1`, and without the
+        // cascade every scenario's teardown would throw an FK violation and
+        // crash the suite. Declared inline because a later ADD CONSTRAINT
+        // cannot be made IF NOT EXISTS.
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS lead_profiles (
+                id SERIAL PRIMARY KEY,
+                lead_id INTEGER NOT NULL UNIQUE REFERENCES leads(id) ON DELETE CASCADE,
+
+                -- What they're looking for. Mirrors the search filter fields,
+                -- plus the rent/sale distinction added in the previous phase.
+                transaction TEXT CHECK (transaction IN ('rent', 'sale')),
+                property_type TEXT CHECK (property_type IN (
+                    'chambre_salon', 'appartement', 'villa',
+                    'terrain', 'mini_villa', 'appartement_meuble'
+                )),
+                city TEXT,
+                neighbourhood TEXT,
+                bedrooms_min INTEGER,
+                bedrooms_max INTEGER,
+
+                -- budget_max is the stated ceiling; budget_stretch_max is what
+                -- they'd go to if pushed ("I could stretch to 90"). A real
+                -- number, NOT a boolean flag: a flag would force the search
+                -- layer to invent a stretch percentage, which is exactly the
+                -- kind of made-up figure this codebase forbids everywhere else.
+                budget_max INTEGER,
+                budget_stretch_max INTEGER,
+
+                purpose TEXT CHECK (purpose IN ('self_use', 'investment', 'rental_income')),
+                timeline TEXT CHECK (timeline IN ('immediate', 'within_1_month', 'within_3_months', 'later', 'exploring')),
+
+                -- How the conversation is going, as opposed to what they want.
+                last_objection TEXT,
+                liked_property_ids INTEGER[] DEFAULT '{}',
+                rejected_property_ids INTEGER[] DEFAULT '{}',
+                rejection_reasons JSONB DEFAULT '{}'::jsonb,
+                last_properties_shown INTEGER[] DEFAULT '{}',
+
+                -- Long-term memory. The raw transcript is short-term and wins
+                -- on conflict; this carries the gist of everything older.
+                conversation_summary TEXT,
+
+                created_at TIMESTAMPTZ DEFAULT now(),
+                updated_at TIMESTAMPTZ DEFAULT now()
+            );
+        `);
+        // Per CLAUDE.md: every table queried by lead needs an index on that FK.
+        // (UNIQUE already provides one here, but stated explicitly so the rule
+        // isn't quietly relied on via a constraint that could later change.)
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_profiles_lead_id ON lead_profiles (lead_id);`);
+
+        // Records WHEN the current pending booking state was set, so it can be
+        // expired. Without it a lead who goes quiet mid-booking stays parked in
+        // 'awaiting_viewing_datetime' forever, and their "hello" three days
+        // later is read as a date for a property they've long forgotten.
+        await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS pending_set_at TIMESTAMPTZ;`);
+
         // Client decision: no per-agency contact numbers — every listing
         // always shows the single EXCELIA office number. Updating seed.js
         // alone wouldn't touch already-seeded live rows (seed.js skips
