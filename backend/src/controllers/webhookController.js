@@ -21,6 +21,7 @@ const {
     composeSelectionUnclear,
     composeMediaResent,
     composeListingAnswer,
+    composeConfirmBooking,
     composeMidFlowAcknowledgement,
 } = require('../utils/replyComposer');
 const {
@@ -385,7 +386,7 @@ const ViewingSelectionSchema = z.object({
     // ("actually under 400000", "show me apartments instead") was being read
     // as an attempt to pick a listing. Detecting it lets the flow drop back
     // into search instead of trapping them in the booking prompt.
-    decision: z.enum(['decline', 'select', 'wants_to_book', 'new_search', 'request_media', 'question', 'greeting', 'closing', 'unclear']),
+    decision: z.enum(['decline', 'select', 'express_interest', 'wants_to_book', 'new_search', 'request_media', 'question', 'greeting', 'closing', 'unclear']),
     selected_number: z.number().int().nullable(),
 });
 
@@ -400,7 +401,8 @@ const extractViewingSelection = async (text, listingCount, history = []) => {
             temperature: 0,
             system: `The user was just shown a numbered list of ${listingCount} real estate properties (numbered 1 to ${listingCount}) and asked if they'd like to book a viewing. Classify their reply.
 - decision:
-  * "select" — they clearly indicate exactly ONE property, by number or by an unambiguous description matching one listing's position ("the second one", "the villa in Bè").
+  * "select" — they are clearly ASKING TO BOOK a specific one, or answering the "which one?" question with a bare choice ("1", "number 2", "the second one", "book the villa"). Set selected_number.
+  * "express_interest" — they say they LIKE or prefer one, without actually asking to book it ("ok, 1 I liked", "the first one looks nice", "I prefer the villa", "j'aime bien le 2"). Liking is NOT the same as booking. Set selected_number.
   * "wants_to_book" — they clearly want to book but have NOT said which property ("yes", "yes I want to book an appointment", "oui je veux visiter"). An enthusiastic yes is NOT unclear.
   * "new_search" — they are changing or refining what they're looking for rather than picking from the list ("actually under 400000", "do you have apartments instead?", "what about Bè?", "something cheaper"). This is a NEW requirement, not a selection.
   * "request_media" — they are asking to SEE more of a specific listing rather than to book it ("can you share some photos of 1", "more pictures of the second one", "send me the video", "où se trouve le 2 ?"). Set selected_number to the listing they mean. Wanting to look at photos is NOT the same as choosing to book a viewing.
@@ -579,6 +581,25 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
         return { text: await composeBookingDeclined({ lang, history }), mediaListings: null };
     }
 
+    // They like one but haven't asked to book it. Confirm intent BEFORE asking
+    // for a date — jumping straight to "what date suits you?" assumes a
+    // decision the customer never actually made. Narrowing pendingListingIds
+    // to the one they named means a following "yes" resolves to it.
+    if (
+        selection.decision === 'express_interest' &&
+        Number.isInteger(selection.selected_number) &&
+        selection.selected_number >= 1 &&
+        selection.selected_number <= pendingListingIds.length
+    ) {
+        const propertyId = pendingListingIds[selection.selected_number - 1];
+        const property = await getPropertyById(propertyId);
+        if (property) {
+            await setPendingViewingSelection(leadId, [propertyId]);
+            const propertyLabel = `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`;
+            return { text: await composeConfirmBooking({ lang, propertyLabel, history }), mediaListings: null };
+        }
+    }
+
     if (
         selection.decision === 'select' &&
         Number.isInteger(selection.selected_number) &&
@@ -597,6 +618,17 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
     // They clearly want to book but didn't say which one — that's a normal
     // answer, not a misunderstanding. Keep the pending state and ask which.
     if (selection.decision === 'wants_to_book') {
+        // Only one candidate left (they named it last turn and we asked to
+        // confirm) — "yes" is unambiguous, so move on to the date.
+        if (pendingListingIds.length === 1) {
+            const propertyId = pendingListingIds[0];
+            await setPendingViewingDatetime(leadId, propertyId);
+            const property = await getPropertyById(propertyId);
+            const propertyLabel = property
+                ? `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`
+                : '';
+            return { text: await composeAskDatetime({ lang, propertyLabel, history }), mediaListings: null };
+        }
         return { text: await composeBookingPrompt({ lang, listingCount: pendingListingIds.length, history }), mediaListings: null };
     }
 

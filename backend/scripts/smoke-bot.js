@@ -250,6 +250,37 @@ const run = async () => {
         check('did not claim a booking', !/(is )?(confirmed|booked|registered)\b|let the team know/i.test(r.reply), r.reply);
     });
 
+    await scenario('REPORTED: liking a property must NOT auto-book it', async (p) => {
+        await send(p, 'I want a villa');
+        const r = await send(p, 'Ok, 1 one I liked');
+        check('did NOT jump straight to asking for a date',
+            r.pendingAction !== 'awaiting_viewing_datetime', `pending=${r.pendingAction}`);
+        check('asked whether they want a viewing', /\?/.test(r.reply), r.reply);
+        check('did not ask for a date yet',
+            !/what date|which date|quelle date|date and time/i.test(r.reply), r.reply);
+        const y = await send(p, 'yes please');
+        check('confirming then moves to the date step',
+            y.pendingAction === 'awaiting_viewing_datetime', `pending=${y.pendingAction}`);
+        const d = await send(p, 'saturday morning');
+        check('booking completes', (await apptCount(p)) === 1);
+    });
+
+    await scenario('REPORTED: a returning customer saying Hi still gets greeted', async (p) => {
+        await send(p, 'hello');
+        await send(p, 'I want a villa');
+        await send(p, 'no thanks');
+        const r = await send(p, 'Hi');
+        check('greeted back rather than only asking a question',
+            /\b(hello|hi|hey|welcome|bonjour|salut|ravi)\b/i.test(r.reply), r.reply);
+    });
+
+    await scenario('A bare number after the booking prompt still books directly', async (p) => {
+        await send(p, 'I am looking for a 1bhk');
+        const r = await send(p, '1');
+        check('treated as a real choice, asked for a date',
+            r.pendingAction === 'awaiting_viewing_datetime', `pending=${r.pendingAction}`);
+    });
+
     await scenario('MEMORY: never asks the same question twice', async (p) => {
         await send(p, 'I am looking for a 1bhk');
         const a = await send(p, '1');                          // first date ask

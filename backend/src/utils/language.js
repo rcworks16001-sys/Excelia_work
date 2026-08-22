@@ -118,6 +118,10 @@ const BOT_STRINGS = {
         fr: "C'est noté ! Votre demande de visite a été enregistrée pour :",
         en: "Got it! Your viewing request has been saved for:",
     },
+    confirm_booking: {
+        fr: "Très bien ! Souhaitez-vous que j'organise une visite pour ce bien ?",
+        en: "Great choice! Would you like me to arrange a viewing for it?",
+    },
     listing_answer: {
         fr: "Voici les détails de ce bien :",
         en: "Here are the details for that property:",

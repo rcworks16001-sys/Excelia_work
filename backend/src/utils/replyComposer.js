@@ -72,7 +72,7 @@ CONVERSATION SO FAR (oldest first) — you have already said these things:
 ${lines}
 
 Rules given this history:
-- NEVER repeat a greeting, welcome, or introduction you have already sent. You have already met this customer.
+- Do not re-introduce yourself or re-explain what EXCELIA does — you have already met this customer. Greeting them back politely is still fine and expected; just keep it brief and word it differently from last time.
 - NEVER re-ask something they have already answered.
 - Vary your wording; do not reuse a sentence you already used above.
 - If you need to ask again for something you already asked for, REPHRASE it and first acknowledge whatever just happened. Never restate your previous question word for word.
@@ -107,6 +107,26 @@ const stillNeededLine = (stillNeeded) => {
     if (stillNeeded === 'date') return '\n\nEnd by inviting them, in a FRESH wording, to tell you a day and time that suits them. Do not repeat your earlier phrasing of that question, and do not ask which property — they have already chosen one.';
     if (stillNeeded === 'selection') return '\n\nEnd by inviting them, in a FRESH wording, to tell you which property they would like (by number). Do not repeat your earlier phrasing of that question.';
     return '';
+};
+
+// ── composeConfirmBooking ──
+// They signalled a preference ("the first one looks good") rather than asking
+// to book. Liking a property is not the same as booking a viewing, so we
+// confirm intent BEFORE asking for a date.
+const composeConfirmBooking = async ({ lang, propertyLabel, history }) => {
+    const system = `${BASE_PERSONA}
+
+Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
+
+Your task: the customer indicated they like one of the properties, but has NOT asked to book anything. Acknowledge their choice warmly, then ASK whether they would like you to arrange a viewing for it. One or two short sentences.
+
+Do NOT ask for a date or time yet — you must not assume they want to book. Do NOT say anything is booked or arranged.
+
+You may refer to the property as: "${propertyLabel}". Do not state its price or any other detail.${historyBlock(history)}`;
+
+    const user = 'Write the reply.';
+
+    return callComposer(system, user, BOT_STRINGS.confirm_booking[lang]);
 };
 
 // ── composeListingAnswer ──
@@ -190,7 +210,9 @@ const composeGreeting = async ({ lang, userMessage, isNewLead, history }) => {
 
 Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
 
-Your task: greet the customer${isNewLead ? ' (this is their very first message to us)' : ''} and invite them to say what they are looking for. Mention naturally that they can tell you the area, the type of property, their budget, or the number of bedrooms — do not present this as a rigid list or a form.${historyBlock(history)}`;
+Your task: ALWAYS open with a warm greeting — never jump straight into a question. ${isNewLead
+        ? 'This is their very first message to us, so welcome them to EXCELIA properly.'
+        : 'They have contacted us before, so greet them back warmly like a returning customer ("Hello again!" / "Bonjour, ravi de vous revoir !") WITHOUT repeating the full introduction.'} Then invite them to say what they are looking for, mentioning naturally that they can tell you the area, the type of property, their budget, or the number of bedrooms — never as a rigid list or a form.${historyBlock(history)}`;
 
     const user = `The customer wrote: "${userMessage}"
 
@@ -362,6 +384,7 @@ module.exports = {
     composeResultsIntro,
     composeMediaResent,
     composeListingAnswer,
+    composeConfirmBooking,
     composeMidFlowAcknowledgement,
     composeNoResults,
     composeGreeting,
