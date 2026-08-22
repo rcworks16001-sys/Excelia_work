@@ -17,8 +17,12 @@ const getOrCreateLead = async (phone, name, language) => {
 
     if (existing.rows.length > 0) {
         const row = existing.rows[0];
+        // COALESCE on language too: callers pass null when the inbound message
+        // carries NO reliable language signal (an image, a sticker, a bare
+        // "ok"). Without this, one image would overwrite a known-English lead
+        // back to the default and flip the whole conversation to French.
         await pool.query(
-            'UPDATE leads SET language = $1, name = COALESCE(name, $2), last_message_at = now() WHERE id = $3',
+            'UPDATE leads SET language = COALESCE($1, language), name = COALESCE(name, $2), last_message_at = now() WHERE id = $3',
             [language, name, row.id]
         );
         return {
@@ -30,8 +34,10 @@ const getOrCreateLead = async (phone, name, language) => {
         };
     }
 
+    // language is NOT NULL — a brand-new lead whose very first message carries
+    // no language signal (an image) falls back to the column default.
     const inserted = await pool.query(
-        'INSERT INTO leads (phone, name, language, last_message_at) VALUES ($1, $2, $3, now()) RETURNING id',
+        "INSERT INTO leads (phone, name, language, last_message_at) VALUES ($1, $2, COALESCE($3, 'fr'), now()) RETURNING id",
         [phone, name, language]
     );
     return {

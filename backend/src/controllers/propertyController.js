@@ -32,56 +32,101 @@ const EXCELIA_OFFICE_CONTACT = '+228 91062626 — EXCELIA office';
 // return the 3 closest listings. If still no results, returns an empty array —
 // the caller (bot conversation logic) is responsible for asking a clarifying
 // question in the user's language.
-const searchProperties = async (filters = {}) => {
+// The ONE place a property search query is built. Every search path
+// (strict, relaxed, dashboard) goes through this — never hand-roll another.
+const buildQuery = (filters, limit) => {
     const { city, neighbourhood, type, price_max, bedrooms } = filters;
+    const conditions = [];
+    const values = [];
 
-    const buildQuery = ({ includeNeighbourhood, limit }) => {
-        const conditions = [];
-        const values = [];
-
-        if (city) {
-            values.push(`%${city}%`);
-            // unaccent() on both sides: WhatsApp/French input very commonly
-            // drops accents ("lome" for "Lomé") — plain ILIKE is
-            // case-insensitive but not accent-insensitive.
-            conditions.push(`unaccent(city) ILIKE unaccent($${values.length})`);
-        }
-        if (includeNeighbourhood && neighbourhood) {
-            values.push(`%${neighbourhood}%`);
-            conditions.push(`unaccent(neighbourhood) ILIKE unaccent($${values.length})`);
-        }
-        if (type) {
-            values.push(type);
-            conditions.push(`type = $${values.length}`);
-        }
-        if (bedrooms !== undefined && bedrooms !== null) {
-            values.push(bedrooms);
-            conditions.push(`bedrooms = $${values.length}`);
-        }
-        if (price_max) {
-            values.push(Math.round(price_max * PRICE_TOLERANCE));
-            conditions.push(`price <= $${values.length}`);
-        }
-
-        const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-        const text = `SELECT ${PROPERTY_COLUMNS} FROM properties ${whereClause} ORDER BY price ASC LIMIT ${limit}`;
-        return { text, values };
-    };
-
-    const primary = buildQuery({ includeNeighbourhood: true, limit: 10 });
-    let result = await pool.query(primary.text, primary.values);
-
-    if (result.rows.length > 0) {
-        return result.rows;
+    if (city) {
+        values.push(`%${city}%`);
+        // unaccent() on both sides: WhatsApp/French input very commonly
+        // drops accents ("lome" for "Lomé") — plain ILIKE is
+        // case-insensitive but not accent-insensitive.
+        conditions.push(`unaccent(city) ILIKE unaccent($${values.length})`);
     }
+    if (neighbourhood) {
+        values.push(`%${neighbourhood}%`);
+        conditions.push(`unaccent(neighbourhood) ILIKE unaccent($${values.length})`);
+    }
+    if (type) {
+        values.push(type);
+        conditions.push(`type = $${values.length}`);
+    }
+    if (bedrooms !== undefined && bedrooms !== null) {
+        values.push(bedrooms);
+        conditions.push(`bedrooms = $${values.length}`);
+    }
+    if (price_max) {
+        values.push(Math.round(price_max * PRICE_TOLERANCE));
+        conditions.push(`price <= $${values.length}`);
+    }
+
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const text = `SELECT ${PROPERTY_COLUMNS} FROM properties ${whereClause} ORDER BY price ASC LIMIT ${limit}`;
+    return { text, values };
+};
+
+const runSearch = async (filters, limit) => {
+    const { text, values } = buildQuery(filters, limit);
+    const result = await pool.query(text, values);
+    return result.rows;
+};
+
+const searchProperties = async (filters = {}) => {
+    const rows = await runSearch(filters, 10);
+    if (rows.length > 0) return rows;
 
     // No results — relax neighbourhood, keep type + price, return 3 closest.
-    if (neighbourhood) {
-        const relaxed = buildQuery({ includeNeighbourhood: false, limit: 3 });
-        result = await pool.query(relaxed.text, relaxed.values);
+    if (filters.neighbourhood) {
+        return runSearch({ ...filters, neighbourhood: null }, 3);
+    }
+    return rows; // may still be empty
+};
+
+// ── searchPropertiesWithFallback(filters) ──
+// What the BOT uses. Same query builder as searchProperties (no duplicated
+// search logic) but never dead-ends: it widens the search step by step until
+// something matches, and reports which constraints it had to drop so the
+// reply can say so honestly instead of pretending it was an exact match.
+//
+// Drop order is "least painful first". price_max is held onto the longest —
+// showing someone a 6 000 000 F CFA plot when they asked for 35 000 is worse
+// than showing them a different neighbourhood — and is only dropped as an
+// explicit last resort.
+//
+// Returns { listings, relaxed: ['neighbourhood', 'bedrooms', ...] }.
+// `relaxed` is empty when the strict search matched.
+const searchPropertiesWithFallback = async (filters = {}) => {
+    const steps = [
+        { drop: [] },
+        { drop: ['neighbourhood'] },
+        { drop: ['neighbourhood', 'bedrooms'] },
+        { drop: ['neighbourhood', 'bedrooms', 'type'] },
+        { drop: ['neighbourhood', 'bedrooms', 'type', 'city'] },
+        { drop: ['neighbourhood', 'bedrooms', 'type', 'city', 'price_max'] },
+    ];
+
+    // A wide-open query ("anything cheap?") would otherwise return 10 full
+    // listing cards — a wall of text in WhatsApp. Show a browsable handful
+    // instead; the lead can narrow down from there.
+    const hasAnyFilter = ['city', 'neighbourhood', 'type', 'price_max', 'bedrooms']
+        .some((f) => filters[f] !== undefined && filters[f] !== null);
+    const strictLimit = hasAnyFilter ? 10 : 5;
+
+    for (const step of steps) {
+        // Only count a constraint as "relaxed" if it was actually set — a
+        // dropped filter the user never gave isn't something to apologise for.
+        const relaxed = step.drop.filter((f) => filters[f] !== undefined && filters[f] !== null);
+        const attemptFilters = { ...filters };
+        for (const field of step.drop) attemptFilters[field] = null;
+
+        const listings = await runSearch(attemptFilters, step.drop.length === 0 ? strictLimit : 3);
+        if (listings.length > 0) return { listings, relaxed };
     }
 
-    return result.rows; // may still be empty
+    return { listings: [], relaxed: [] }; // only if the table is empty
 };
 
 // ── getKnownLocations() ──
@@ -364,6 +409,7 @@ const remove = async (req, res) => {
 };
 
 module.exports = {
-    searchProperties, search, getPropertyById, list, uploadPhoto, deletePhoto,
-    uploadVideo, deleteVideo, getKnownLocations, create, remove, VALID_PROPERTY_TYPES,
+    searchProperties, searchPropertiesWithFallback, search, getPropertyById, list,
+    uploadPhoto, deletePhoto, uploadVideo, deleteVideo, getKnownLocations,
+    create, remove, VALID_PROPERTY_TYPES,
 };

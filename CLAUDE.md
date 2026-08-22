@@ -54,7 +54,7 @@ All of the above is committed and pushed to `main` (latest relevant commit `9172
 
 ### ⏳ Actually pending
 - **Real property photos are not uploaded yet.** The upload *infrastructure* is done, but no real image files have been added to Cloudinary/the `photos` column — still waiting on the client. Once received: drop files into `backend/photos-to-upload/<property_id>/` and run `npm run upload-photos` (it prints the id → listing mapping), or use the dashboard's per-listing "Upload photo" button.
-- **Location/map sending is not built at all.** `latitude`/`longitude` columns exist with approximate demo coordinates, but there is no `sendWhatsAppLocation()` and nothing sends a location message. Waiting on the client to send real map/neighbourhood links before building this.
+- **Location coordinates are neighbourhood-level approximations, not exact addresses.** `sendWhatsAppLocation()` is built and every search result now sends a map pin, but the lat/long values are still the seeded demo approximations — accurate to the area, not the street. Replace with real coordinates when the client supplies them.
 - **Admin login has no credentials set.** `ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` are blank in `.env` — the human user needs to run `node backend/scripts/hash-password.js` and set both themselves (never generate/paste real credentials into a Claude chat). The login screen rejects everyone until this is done.
 - **`WHATSAPP_TOKEN` appears expired** — outbound sends fail with Graph API code 190 ("Authentication Error"). Needs a fresh token from the Meta developer app.
 - **Unconfirmed: does Railway auto-run `migrate.js` on deploy?** If not, every future schema/data change needs `node src/db/migrate.js` run manually against production after pushing — this has been done manually each time so far.
@@ -189,7 +189,7 @@ Sending a location pin:
 
 Each message type is a separate API call. To send a listing: text card first, then one image call per photo, then location call. Never combine them into one API call.
 
-**Status:** text and image sending are both built (`sendWhatsAppMessage()`, `sendWhatsAppImage()` in `webhookController.js`). Location sending is **not built** — no `sendWhatsAppLocation()` exists yet; waiting on the client to send real map/neighbourhood links first.
+**Status:** all four are built in `webhookController.js` — `sendWhatsAppMessage()`, `sendWhatsAppImage()`, `sendWhatsAppVideo()`, `sendWhatsAppLocation()`. `sendListingMedia()` fans them out per search result: photos (capped), then video (top listing only), then the location pin.
 
 ---
 
@@ -199,7 +199,8 @@ Each message type is a separate API call. To send a listing: text card first, th
 - Respond in the same language throughout the conversation.
 - If the user switches language mid-conversation, switch with them immediately.
 - All Claude prompts for NLU must instruct the model to respond in French if the input is French, English if English.
-- Bot messages (welcome, no-results, off-topic redirect) must have both FR and EN versions hardcoded. Never ask Claude to translate static bot strings.
+- **Bot replies are composed by Claude at send time** (`utils/replyComposer.js`), in the lead's language — this REVERSES the original "all bot strings hardcoded" rule, because the templated replies read as robotic to the client. `BOT_STRINGS` in `utils/language.js` is still the bilingual **fallback** used whenever a compose call fails, so a Claude outage degrades to the old behaviour instead of silence. Keep both FR and EN versions of every fallback string.
+- **Hard boundary the composer must never cross:** it writes only the conversational wrapper (opening line, explanation of a widened search, follow-up question). Every property fact — price, neighbourhood, type, agency contact — is rendered deterministically by `formatListingsBody()` and appended afterwards. The model is never allowed to author a number, so it cannot hallucinate a price.
 - The `language` field is stored on the `leads` table and updated every message.
 - This is entirely separate from the **dashboard's own FR/EN language toggle** (`frontend/lib/useDashboardLanguage.js`), which only controls the admin UI's chrome (nav labels, headings, etc.) for whoever is operating the dashboard — it never affects bot replies or stored conversation content, and doesn't touch this section's rules at all.
 
@@ -238,7 +239,7 @@ The Claude extraction prompt is built dynamically per call (`buildNluSystemPromp
 
 1. First message from a new number → welcome message (FR or EN based on detected language) → ask what they are looking for. *(Implemented as a welcome prefix prepended to whatever the bot's actual reply would be — see "Key decisions" above — so a first message that already states a full search still gets answered immediately, not just greeted.)*
 2. User describes requirement (free text) → Claude extracts fields → search → return matching listings.
-3. Each listing sent as: text card (type, neighbourhood, price, agency contact) + photos + location pin. *(Photos: built. Location pin: not built yet — see "WhatsApp message types" above.)*
+3. Each listing sent as: text card (type, neighbourhood, price, agency contact) + photos + location pin. *(All built — see `sendListingMedia()`.)*
 4. After listings: ask "Would you like to book a viewing?" (in their language).
 5. If yes → collect preferred date/time → save as appointment → confirm.
 6. Off-topic message → redirect in their language: "Je suis spécialisé dans la recherche immobilière au Togo."

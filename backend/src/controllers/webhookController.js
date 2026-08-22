@@ -5,7 +5,14 @@ const { z } = require('zod/v4');
 const { zodOutputFormat } = require('@anthropic-ai/sdk/helpers/zod');
 
 const pool = require('../db/index');
-const { searchProperties, getPropertyById, getKnownLocations } = require('./propertyController');
+const { searchPropertiesWithFallback, getPropertyById, getKnownLocations } = require('./propertyController');
+const {
+    composeResultsIntro,
+    composeNoResults,
+    composeGreeting,
+    composeOffTopic,
+    composeUnsupportedMedia,
+} = require('../utils/replyComposer');
 const {
     getOrCreateLead,
     getLeadState,
@@ -124,13 +131,39 @@ const sendWhatsAppVideo = async (to, videoUrl, caption) => {
     }
 };
 
+// ── Send WhatsApp location pin ──
+// Same message-type-per-call rule as image/video. Coordinates on the listings
+// are neighbourhood-level approximations, not exact street addresses — the
+// pin shows the area, which is what a lead needs before booking a viewing.
+const sendWhatsAppLocation = async (to, latitude, longitude, name, address) => {
+    try {
+        await axios.post(
+            `https://graph.facebook.com/${GRAPH_API_VERSION}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+            {
+                messaging_product: 'whatsapp',
+                to: to,
+                type: 'location',
+                location: { latitude, longitude, name, address }
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+    } catch (error) {
+        console.error('Error sending WhatsApp location:', error.response?.data);
+    }
+};
+
 // Sends photos for a shown listing (if it has any) and logs each send to the
 // conversation transcript. Capped — sending every photo for every listing
 // shown would flood the chat (up to 10 listings can be returned at once).
 const MAX_LISTINGS_WITH_PHOTOS = 3;
 const MAX_PHOTOS_PER_LISTING = 2;
 
-const sendListingPhotos = async (to, leadId, listings, lang) => {
+const sendListingMedia = async (to, leadId, listings, lang) => {
     const listingsToPhotograph = listings.slice(0, MAX_LISTINGS_WITH_PHOTOS);
 
     for (let i = 0; i < listingsToPhotograph.length; i += 1) {
@@ -160,6 +193,23 @@ const sendListingPhotos = async (to, leadId, listings, lang) => {
                 await saveConversationMessage(leadId, 'bot', `[video sent: ${listing.video_url}]`);
             } catch (logError) {
                 console.error('Failed to log video send to conversations:', logError.message);
+            }
+        }
+
+        // Location pin last, so the lead sees what the place looks like
+        // before where it is. Only when the listing actually has coordinates.
+        if (listing.latitude != null && listing.longitude != null) {
+            await sendWhatsAppLocation(
+                to,
+                listing.latitude,
+                listing.longitude,
+                `${typeLabel} — ${listing.neighbourhood}`,
+                `${listing.neighbourhood}, ${listing.city}`
+            );
+            try {
+                await saveConversationMessage(leadId, 'bot', `[location sent: ${listing.neighbourhood}, ${listing.city}]`);
+            } catch (logError) {
+                console.error('Failed to log location send to conversations:', logError.message);
             }
         }
     }
@@ -212,6 +262,12 @@ Field guidance:
 - intent: "search" if the message expresses any interest in finding/renting/buying/viewing property, even with only one detail given (just a city, just a budget, etc). "off_topic" if clearly unrelated to real estate (weather, jokes, unrelated complaints, general chit-chat). "greeting" for pure greetings/small talk with zero property information ("Bonjour", "Hi", "Ça va ?"). "unclear" only if none of the above fit.
 - city / neighbourhood: the place name as the user meant it, with accents restored if dropped (e.g. "lome" -> "Lomé"). null if not mentioned.${locationGuidance}
 - type: map the user's wording to exactly one of these enum values — "chambre_salon" (single room / studio / "une chambre"), "appartement" (unfurnished apartment), "villa", "terrain" (land / "parcelle"), "mini_villa", "appartement_meuble" (furnished apartment / "meublé"). null if the type is not clearly one of these — never guess a value outside this list.
+  Vocabulary customers actually use, and what it maps to here:
+  * "1bhk", "1 BHK", "studio", "single room", "one room", "chambre salon" -> type "chambre_salon", bedrooms 1. (In this market a one-bedroom home is a "chambre salon", NOT a one-bedroom "appartement" — never map these to "appartement".)
+  * "2bhk"/"3bhk" and similar -> "appartement" with bedrooms 2/3 respectively.
+  * "meublé", "furnished" -> "appartement_meuble".
+  * "parcelle", "plot", "land", "terrain nu" -> "terrain".
+  If the customer's wording implies a size but NOT a building type (e.g. just "something small", "2 bedrooms"), set bedrooms and leave type null rather than guessing a type.
 - price_max: the user's stated maximum budget as a plain integer number of XOF, with no currency symbol, spaces, or separators (e.g. "45000", "45 000 F CFA", "45k" -> 45000). Treat any stated budget as the maximum. null if no budget given.
 - bedrooms: integer number of bedrooms/chambres mentioned. null if not mentioned.
 
@@ -325,13 +381,12 @@ const extractAppointmentDateTime = async (text, referenceNow = null) => {
     }
 };
 
-// ── Build a plain-text results summary ──
-// Text only, by design — no photos or location pin. The client hasn't
-// provided real property photos yet (seed data has empty photo arrays), so
-// sending images/location is Step 4/5 work, not this step's. The properties
-// table already has photos/latitude/longitude columns, so no schema change
-// will be needed to wire those in later.
-const formatListingsSummary = (listings, lang) => {
+// ── Build the numbered listing cards ──
+// EVERY property fact the lead sees is rendered here, deterministically from
+// the DB row. The conversational layer (utils/replyComposer.js) only writes
+// the sentence that sits above these cards — it never authors a price,
+// neighbourhood or contact, so those can't be model-invented.
+const formatListingsBody = (listings, lang) => {
     const lines = listings.map((p, i) => {
         const typeLabel = PROPERTY_TYPE_LABELS[p.type]?.[lang] ?? p.type;
         const bedroomsLabel = lang === 'fr' ? 'chambre(s)' : 'bedroom(s)';
@@ -343,8 +398,13 @@ const formatListingsSummary = (listings, lang) => {
         const descriptionPart = description ? `\n${description}` : '';
         return `${i + 1}. ${typeLabel} — ${p.neighbourhood}, ${p.city}${bedroomsPart} — ${formatXOF(p.price)}${descriptionPart}\nContact: ${p.agency_contact}`;
     });
-    return `${BOT_STRINGS.results_intro[lang]}\n\n${lines.join('\n\n')}`;
+    return lines.join('\n\n');
 };
+
+// Cards prefixed with the hardcoded intro — the fallback shape, used when the
+// conversational composer is unavailable.
+const formatListingsSummary = (listings, lang) =>
+    `${BOT_STRINGS.results_intro[lang]}\n\n${formatListingsBody(listings, lang)}`;
 
 // ── Booking flow, step 1: which listing (or decline)? ──
 const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingIds }) => {
@@ -453,32 +513,44 @@ const handleMessage = async (req, res) => {
         const contactName = value?.contacts?.[0]?.profile?.name || null;
         const text = message.text?.body?.trim();
 
-        // Non-text message (image, location, sticker, ...) — not handled yet,
-        // but still a real contact: create/update the lead and log it. Left
-        // untouched by the booking flow — a pending flow just stays pending.
+        const existingLeadState = await getLeadState(to);
+
+        // Non-text message (image, sticker, voice note, ...) — we can't read
+        // it, but it's still a real contact: log it and reply.
+        //
+        // A media message carries NO language signal, so we reply in the
+        // lead's ALREADY-KNOWN language and pass null so getOrCreateLead
+        // preserves it. Previously this defaulted to French and *wrote* that
+        // default, which silently flipped an English conversation to French
+        // for good the moment someone sent a photo.
         if (message.type !== 'text' || !text) {
-            ({ id: leadId } = await getOrCreateLead(to, contactName, lang));
+            lang = existingLeadState?.language || DEFAULT_LANGUAGE;
+            ({ id: leadId } = await getOrCreateLead(to, contactName, null));
             await saveConversationMessage(leadId, 'user', `[unsupported message type: ${message.type}]`);
-            await replyAndLog(to, leadId, BOT_STRINGS.unsupported_message_type[lang]);
+            const mediaReply = await composeUnsupportedMedia({ lang, mediaType: message.type });
+            await replyAndLog(to, leadId, mediaReply);
             return res.sendStatus(200);
         }
 
-        // Mid-booking-flow replies are often short slot-fills ("1", "oui",
-        // "vendredi 15h") that aren't a reliable language signal on their
-        // own — trust the lead's already-established language instead of
-        // re-detecting and possibly flipping languages mid-conversation.
-        // Otherwise (new lead, or no pending flow) detect fresh as usual.
-        const existingLeadState = await getLeadState(to);
-        lang = (existingLeadState && existingLeadState.pendingAction)
-            ? existingLeadState.language
-            : await detectLanguage(text);
+        // Short replies ("ok", "oui", "1", "yes please") and mid-booking-flow
+        // slot-fills aren't reliable language signals — detection on two words
+        // flips languages at random. Trust the lead's established language in
+        // those cases and only re-detect on a substantial message.
+        const wordCount = text.split(/\s+/).filter(Boolean).length;
+        const hasReliableLanguageSignal = wordCount > 3;
+        if (existingLeadState && (existingLeadState.pendingAction || !hasReliableLanguageSignal)) {
+            lang = existingLeadState.language;
+        } else {
+            lang = await detectLanguage(text);
+        }
 
         const lead = await getOrCreateLead(to, contactName, lang);
         leadId = lead.id;
         await saveConversationMessage(leadId, 'user', text);
 
         let replyBody;
-        let listingsShown = null; // set only when search results were just sent, for the photo follow-up below
+        let listingsShown = null; // set only when search results were just sent, for the media follow-up below
+        let isGreetingReply = false; // a greeting is already a full welcome — never prefix it with another one
         if (lead.pendingAction === 'awaiting_viewing_selection') {
             replyBody = await handleViewingSelectionReply({
                 leadId,
@@ -497,27 +569,39 @@ const handleMessage = async (req, res) => {
             const filters = await extractSearchFilters(text);
 
             if (filters.intent === 'off_topic') {
-                replyBody = BOT_STRINGS.off_topic[lang];
-            } else if (!hasAnyFilter(filters)) {
-                // Bare greeting or nothing usable extracted — ask what they're
-                // looking for rather than dumping every listing. Already a full
-                // welcome on its own, so it never gets the welcome_prefix below.
-                replyBody = BOT_STRINGS.welcome_clarify[lang];
+                replyBody = await composeOffTopic({ lang, userMessage: text });
+            } else if (filters.intent === 'greeting') {
+                // A pure greeting with no property information — welcome them
+                // and invite a requirement. Already a full welcome on its own,
+                // so it never gets the welcome_prefix below.
+                replyBody = await composeGreeting({ lang, userMessage: text, isNewLead: lead.isNew });
+                isGreetingReply = true;
             } else {
-                const listings = await searchProperties({
+                // Real intent, even if vague ("anything cheap?"). An empty
+                // filter set is NOT a reason to re-greet someone who just
+                // asked a genuine question — fall through to the search,
+                // which with no filters returns the cheapest listings.
+                const searchFilters = {
                     city: filters.city,
                     neighbourhood: filters.neighbourhood,
                     type: filters.type,
                     price_max: filters.price_max,
                     bedrooms: filters.bedrooms,
-                });
+                };
+                const { listings, relaxed } = await searchPropertiesWithFallback(searchFilters);
+
                 if (listings.length === 0) {
-                    replyBody = BOT_STRINGS.no_results[lang];
+                    replyBody = await composeNoResults({ lang, userMessage: text });
                 } else {
-                    // Offer a viewing booking and remember which listings
-                    // were shown (in the same numbered order) so a reply
-                    // like "2" can be resolved back to a specific property.
-                    replyBody = `${formatListingsSummary(listings, lang)}\n\n${BOT_STRINGS.booking_prompt[lang]}`;
+                    // Claude writes ONLY the intro line; the listing cards and
+                    // the booking prompt stay template-rendered so no price or
+                    // property detail can ever be model-invented.
+                    const intro = await composeResultsIntro({
+                        lang, userMessage: text, listings, relaxed, filters: searchFilters,
+                    });
+                    replyBody = `${intro}\n\n${formatListingsBody(listings, lang)}\n\n${BOT_STRINGS.booking_prompt[lang]}`;
+                    // Remember which listings were shown (in the same numbered
+                    // order) so a reply like "2" resolves to a specific property.
                     await setPendingViewingSelection(leadId, listings.map((p) => p.id));
                     listingsShown = listings;
                 }
@@ -528,8 +612,7 @@ const handleMessage = async (req, res) => {
         // per CLAUDE.md's "first message from a new number → welcome
         // message" — but we still answer whatever they actually asked
         // rather than making them repeat themselves on a second turn.
-        const isAlreadyAWelcome = replyBody === BOT_STRINGS.welcome_clarify[lang];
-        const replyText = (lead.isNew && !isAlreadyAWelcome)
+        const replyText = (lead.isNew && !isGreetingReply)
             ? `${BOT_STRINGS.welcome_prefix[lang]}\n\n${replyBody}`
             : replyBody;
 
@@ -539,7 +622,7 @@ const handleMessage = async (req, res) => {
         // WhatsApp message-type rules — text first, then image calls, never
         // combined. Only for listings that actually have photos uploaded.
         if (listingsShown) {
-            await sendListingPhotos(to, leadId, listingsShown, lang);
+            await sendListingMedia(to, leadId, listingsShown, lang);
         }
 
         return res.sendStatus(200);
@@ -563,9 +646,11 @@ module.exports = {
     sendWhatsAppMessage,
     sendWhatsAppImage,
     sendWhatsAppVideo,
+    sendWhatsAppLocation,
     handleMessage,
     extractSearchFilters,
     hasAnyFilter,
+    formatListingsBody,
     formatListingsSummary,
     extractViewingSelection,
     extractAppointmentDateTime,
