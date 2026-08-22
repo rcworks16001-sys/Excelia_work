@@ -273,6 +273,21 @@ The bot no longer walks a progressive-relaxation cascade (that function is gone)
   flow alive; only `decline` ends a booking. Rejected ids sink in later rankings rather than being
   removed — if it's all we have, showing it beats showing nothing.
 
+### Dashboard: profile panel, activity timeline, analytics
+- `GET /leads/:id` gained `profile` and `events` as NEW top-level keys. It is polled every 5s with
+  careful merge logic protecting the admin's local-only sent replies — **do not fold new data into the
+  existing `lead` object**, and note profile/events are server-owned so a straight overwrite is safe
+  where conversations and notes are not.
+- The profile panel omits empty fields rather than rendering "—", so it reads as *what we know* rather
+  than a half-filled form. `profile` is null for a lead who only ever said "hi".
+- `analyticsController.js` is the **documented exception** to CLAUDE.md's "no dashboardController" rule:
+  analytics spans leads, events, properties and appointments, so it belongs to no single resource.
+- **Five metrics, deliberately.** Each changes a decision. The most valuable is *searches with no
+  match* — a running list of demand the catalogue cannot serve.
+- Conversion counts a **coherent cohort**: `booked` is restricted to leads who also have a
+  `PROPERTIES_SHOWN` event, otherwise pre-event-tracking appointments produced "3 bookings from 0
+  opportunities".
+
 ### The knowledge layer (`utils/knowledge.js`)
 General "how does property work here" questions (cour commune, titre foncier, deposits, viewings) used
 to be classified `off_topic` and deflected. They are now answered.

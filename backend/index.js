@@ -9,6 +9,7 @@ const leadsRoutes = require('./src/routes/leads');
 const appointmentsRoutes = require('./src/routes/appointments');
 const authRoutes = require('./src/routes/auth');
 const notificationsRoutes = require('./src/routes/notifications');
+const analyticsRoutes = require('./src/routes/analytics');
 
 const app = express();
 
@@ -22,6 +23,7 @@ app.use('/api/leads', leadsRoutes);
 app.use('/api/appointments', appointmentsRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/notifications', notificationsRoutes);
+app.use('/api/analytics', analyticsRoutes);
 
 // Test route
 app.get('/', (req, res) => {

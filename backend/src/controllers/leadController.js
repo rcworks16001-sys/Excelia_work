@@ -1,4 +1,5 @@
 const pool = require('../db/index');
+const { getEventsForLead } = require('./leadEventController');
 
 // A booking conversation that has gone cold is worse than no booking
 // conversation: without an expiry, a lead who stops replying while being asked
@@ -147,8 +148,6 @@ const setPendingViewingDatetime = async (leadId, propertyId) => {
     );
 };
 
-// `client` lets this join a caller's transaction (see pool.withTransaction) —
-// clearing the flow after createAppointment must be atomic with it.
 // ── advanceLeadStatus(leadId, target) ──
 // The bot moving a lead along the pipeline. Two hard rules, both about not
 // fighting the human using the dashboard:
@@ -180,6 +179,8 @@ const advanceLeadStatus = async (leadId, target, client = pool) => {
     return target;
 };
 
+// `client` lets this join a caller's transaction (see pool.withTransaction) —
+// clearing the flow after createAppointment must be atomic with it.
 const clearPendingAction = async (leadId, client = pool) => {
     await client.query(
         'UPDATE leads SET pending_action = NULL, pending_property_id = NULL, pending_listing_ids = NULL, pending_set_at = NULL WHERE id = $1',
@@ -260,7 +261,30 @@ const getLeadWithConversation = async (id) => {
         [id]
     );
 
-    return { lead, conversations: conversations.rows, appointments: appointments.rows };
+    // What the bot has learned about them, and what it saw them do. Added as
+    // NEW top-level keys rather than folded into `lead` — the detail page polls
+    // this every 5s with careful merge logic around the admin's local-only
+    // sent replies, so changing the existing shape risks breaking that.
+    const profile = await pool.query(
+        `SELECT transaction, property_type, city, neighbourhood,
+                bedrooms_min, bedrooms_max, budget_max, budget_stretch_max,
+                purpose, timeline, liked_property_ids, rejected_property_ids,
+                rejection_reasons, lead_score, lead_temperature,
+                needs_human, handoff_reason, handoff_at, updated_at
+           FROM lead_profiles WHERE lead_id = $1`,
+        [id]
+    );
+
+    const events = await getEventsForLead(id, 30);
+
+    return {
+        lead,
+        conversations: conversations.rows,
+        appointments: appointments.rows,
+        // null for a lead who has only ever said "hi" — the UI must handle it.
+        profile: profile.rows[0] || null,
+        events,
+    };
 };
 
 const getById = async (req, res) => {

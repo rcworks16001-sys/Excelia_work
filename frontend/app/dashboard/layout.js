@@ -20,6 +20,7 @@ export default function DashboardLayout({ children }) {
         { label: t.navLeads, href: '/dashboard', icon: '👥' },
         { label: t.navProperties, href: '/dashboard/properties', icon: '🏠' },
         { label: t.navAppointments, href: '/dashboard/appointments', icon: '📅' },
+        { label: t.navAnalytics, href: '/dashboard/analytics', icon: '📊' },
     ];
 
     // The backend's authenticateAdmin middleware is the real security

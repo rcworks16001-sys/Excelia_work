@@ -550,6 +550,32 @@ const run = async () => {
             r.pendingAction === 'awaiting_viewing_selection', `pending=${r.pendingAction}`);
     });
 
+    await scenario('REJECTION on price shows CHEAPER options, never dearer ones', async (p) => {
+        await send(p, 'I want to rent a villa in Lome, 4 bedrooms, budget 400000');
+        // The villa they reject is the cheapest one that fits. Sinking it
+        // without moving the budget promoted the DEARER villas — the bot
+        // answering "too expensive" with something costlier.
+        const r = await send(p, "I don't like the first one, too expensive");
+        const prices = [...r.reply.matchAll(/([\d ]+) F CFA/g)]
+            .map((m) => Number(m[1].replace(/ /g, '')))
+            .filter((n) => Number.isFinite(n) && n > 0);
+        check('offered something', prices.length > 0, r.reply.slice(0, 150));
+        check('everything offered is cheaper than what they rejected',
+            prices.every((n) => n < 350000), `prices=${prices.join(',')}`);
+    });
+
+    await scenario('KNOWLEDGE mid-booking: a question is answered, not "I didn\'t catch that"', async (p) => {
+        await send(p, 'I want to rent a villa in Lome');
+        // Asked while choosing a listing, this used to hit the selection NLU,
+        // classify as unclear, and get brushed off — a sensible question
+        // penalised purely for its timing.
+        const r = await send(p, 'what is a cour commune?');
+        check('answered the question', /courtyard|cour/i.test(r.reply), r.reply.slice(0, 160));
+        check("did not say it didn't understand",
+            !/didn't quite catch|n'ai pas compris/i.test(r.reply), r.reply.slice(0, 160));
+        check('booking flow survived', r.pendingAction === 'awaiting_viewing_selection', `pending=${r.pendingAction}`);
+    });
+
     console.log(`\n${'='.repeat(72)}`);
     if (skipped > 0) {
         // Stated loudly: a green partial run is not a green suite, and this

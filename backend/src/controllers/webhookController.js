@@ -880,9 +880,25 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
 
         if (selection.rejection_reason) {
             await recordRejectionReason(leadId, propertyId, selection.rejection_reason);
+
+            // "Too expensive" has to move the budget, not just sink the
+            // listing. Without this, rejecting the CHEAPEST option on price
+            // simply promoted the dearer ones — the bot answering "that's too
+            // expensive" with something costlier, which is the opposite of
+            // listening. Same rule as the whole-set price objection below.
+            if (selection.rejection_reason === 'price') {
+                const rejectedProperty = await getPropertyById(propertyId);
+                if (rejectedProperty) {
+                    await mergeProfile(leadId, {
+                        deltas: { budget_max: Math.max(1, rejectedProperty.price - 1) },
+                        clearedFields: ['budget_stretch_max'],
+                    });
+                }
+            }
+
             // They told us why, so re-searching now beats interrogating them.
             // Returning null hands control back to the search path, which
-            // re-ranks with this listing sunk.
+            // re-ranks with this listing sunk and any new ceiling applied.
             return null;
         }
 
@@ -974,6 +990,23 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
     if (selection.decision === 'new_search') {
         await clearPendingAction(leadId);
         return null;
+    }
+
+    // Before giving up: a general property question asked mid-booking lands
+    // here, because the selection NLU is only looking for a choice between
+    // listings. "What is a cour commune?" is not unclear — it just wasn't a
+    // selection. A free keyword lookup rescues it, and the booking survives.
+    const midFlowFacts = findKnowledge(text);
+    if (midFlowFacts.length) {
+        await recordEvent(leadId, EVENT_TYPES.QUESTION_ANSWERED, {
+            metadata: { matched: midFlowFacts.map((f) => f.id), midFlow: true },
+        });
+        return {
+            text: await composeKnowledgeAnswer({
+                lang, userMessage: text, facts: knowledgeBlock(midFlowFacts, lang), history,
+            }),
+            mediaListings: null,
+        };
     }
 
     // Genuinely couldn't tell which listing they meant.

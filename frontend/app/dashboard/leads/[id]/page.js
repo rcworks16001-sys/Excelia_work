@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import api from '../../../../lib/api';
-import { STATUSES as LEAD_STATUSES, STATUS_CONFIG as LEAD_STATUS_CONFIG, APPOINTMENT_STATUS_CONFIG } from '../../../../lib/statusConfig';
+import { STATUSES as LEAD_STATUSES, STATUS_CONFIG as LEAD_STATUS_CONFIG, APPOINTMENT_STATUS_CONFIG, TEMPERATURE_CONFIG } from '../../../../lib/statusConfig';
 import { useDashboardLanguage } from '../../../../lib/useDashboardLanguage';
 import { dashboardStrings, propertyTypeLabels, timeOfDayLabels } from '../../../../lib/dashboardStrings';
 
@@ -15,6 +15,34 @@ import { dashboardStrings, propertyTypeLabels, timeOfDayLabels } from '../../../
 // physically happen there — without this, toLocaleString silently renders in
 // whatever zone the ADMIN's browser is in, so a 15:00 Lomé viewing showed as
 // 20:30 to someone in India. Appointment times must not move with the viewer.
+
+// Renders only what the bot has ACTUALLY established. An empty field is not
+// shown at all rather than displayed as "—", so this panel reads as "here is
+// what we know" instead of a mostly-blank form.
+const requirementFields = (profile, t, lang) => {
+    if (!profile) return [];
+    const money = (n) => `${Math.abs(Math.round(n)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} F CFA`;
+    const beds = profile.bedrooms_min === profile.bedrooms_max
+        ? profile.bedrooms_min
+        : `${profile.bedrooms_min ?? '?'}-${profile.bedrooms_max ?? '?'}`;
+    return [
+        profile.transaction && { label: t.fieldTransaction, value: t.transactionLabels[profile.transaction] },
+        profile.property_type && { label: t.fieldType, value: propertyTypeLabels[lang][profile.property_type] },
+        (profile.neighbourhood || profile.city) && { label: t.fieldArea, value: [profile.neighbourhood, profile.city].filter(Boolean).join(', ') },
+        profile.bedrooms_min != null && { label: t.fieldBedrooms, value: beds },
+        profile.budget_max && {
+            label: t.fieldBudget,
+            // The stretch figure is shown alongside, not instead: "they said
+            // 80 but would go to 90" is a different negotiating position.
+            value: profile.budget_stretch_max
+                ? `${money(profile.budget_max)} (${t.upTo} ${money(profile.budget_stretch_max)})`
+                : money(profile.budget_max),
+        },
+        profile.timeline && { label: t.fieldTimeline, value: t.timelineLabels[profile.timeline] || profile.timeline },
+        profile.purpose && { label: t.fieldPurpose, value: t.purposeLabels[profile.purpose] || profile.purpose },
+    ].filter(Boolean);
+};
+
 const formatDate = (date, lang) => {
     if (!date) return '—';
     return new Date(date).toLocaleString(lang === 'fr' ? 'fr-FR' : 'en-GB', {
@@ -65,6 +93,8 @@ export default function LeadDetailPage() {
     const [lead, setLead] = useState(null);
     const [conversations, setConversations] = useState([]);
     const [appointments, setAppointments] = useState([]);
+    const [profile, setProfile] = useState(null);
+    const [events, setEvents] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [statusSaving, setStatusSaving] = useState(false);
@@ -158,6 +188,10 @@ export default function LeadDetailPage() {
                 return [...response.data.conversations, ...localOnly];
             });
             setAppointments(response.data.appointments);
+            // Server-owned and never edited locally, so a straight overwrite is
+            // safe here (unlike conversations and notes above).
+            setProfile(response.data.profile);
+            setEvents(response.data.events || []);
             // Only seed the notes textarea once — a silent poll must never
             // clobber whatever the admin is currently typing.
             if (!notesLoadedRef.current) {
@@ -315,6 +349,81 @@ export default function LeadDetailPage() {
                     </div>
                     {sendError && <div style={{ fontSize: 12, color: '#b91c1c', marginTop: 6 }}>{sendError}</div>}
                 </div>
+
+                {/* What the bot has worked out about them. Null for a lead who
+                    has only ever said "hi" — no profile row exists yet. */}
+                {profile && (
+                    <div style={{ marginBottom: 24 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                            <span style={{ fontSize: 11, fontWeight: 800, color: 'var(--fog)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                                {t.requirement}
+                            </span>
+                            <span style={{
+                                fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 999,
+                                background: TEMPERATURE_CONFIG[profile.lead_temperature]?.bg || 'var(--mist)',
+                                color: TEMPERATURE_CONFIG[profile.lead_temperature]?.color || 'var(--ash)',
+                            }}>
+                                {TEMPERATURE_CONFIG[profile.lead_temperature]?.label[lang] || profile.lead_temperature}
+                                {' · '}{profile.lead_score}/100
+                            </span>
+                            {profile.needs_human && (
+                                <span style={{
+                                    fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 999,
+                                    background: '#fef3c7', color: '#92400e',
+                                }}>
+                                    {t.needsHuman}
+                                </span>
+                            )}
+                        </div>
+
+                        <div style={{ background: '#fff', border: '1px solid var(--ice)', borderRadius: 'var(--r-card)', padding: 16 }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
+                                {requirementFields(profile, t, lang).map((f) => (
+                                    <div key={f.label}>
+                                        <div style={{ fontSize: 10, color: 'var(--fog)', marginBottom: 2 }}>{f.label}</div>
+                                        <div style={{ fontSize: 13, fontWeight: 600 }}>{f.value}</div>
+                                    </div>
+                                ))}
+                            </div>
+                            {/* Nothing extracted yet — say so rather than
+                                rendering an empty grid that looks broken. */}
+                            {requirementFields(profile, t, lang).length === 0 && (
+                                <div style={{ fontSize: 12, color: 'var(--fog)' }}>{t.requirementEmpty}</div>
+                            )}
+                        </div>
+                    </div>
+                )}
+
+                {/* What they actually did — the transcript says what was said,
+                    this says what happened. */}
+                {events.length > 0 && (
+                    <div style={{ marginBottom: 24 }}>
+                        <div style={{ fontSize: 11, fontWeight: 800, color: 'var(--fog)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
+                            {t.activity}
+                        </div>
+                        <div style={{ background: '#fff', border: '1px solid var(--ice)', borderRadius: 'var(--r-card)', padding: 16 }}>
+                            {events.slice(0, 12).map((e, i) => (
+                                <div key={e.id} style={{
+                                    display: 'flex', justifyContent: 'space-between', gap: 10,
+                                    padding: '6px 0',
+                                    borderBottom: i < Math.min(events.length, 12) - 1 ? '1px solid var(--ice)' : 'none',
+                                }}>
+                                    <span style={{ fontSize: 12 }}>
+                                        {t.eventLabels[e.event_type] || e.event_type}
+                                        {e.neighbourhood && (
+                                            <span style={{ color: 'var(--fog)' }}>
+                                                {' — '}{propertyTypeLabels[lang][e.property_type] || e.property_type}, {e.neighbourhood}
+                                            </span>
+                                        )}
+                                    </span>
+                                    <span style={{ fontSize: 10, color: 'var(--fog)', whiteSpace: 'nowrap' }}>
+                                        {formatDate(e.created_at, lang)}
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
 
                 {/* Appointments */}
                 <div>
