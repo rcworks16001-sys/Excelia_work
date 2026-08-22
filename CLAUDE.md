@@ -273,6 +273,30 @@ The bot no longer walks a progressive-relaxation cascade (that function is gone)
   flow alive; only `decline` ends a booking. Rejected ids sink in later rankings rather than being
   removed — if it's all we have, showing it beats showing nothing.
 
+### The knowledge layer (`utils/knowledge.js`)
+General "how does property work here" questions (cour commune, titre foncier, deposits, viewings) used
+to be classified `off_topic` and deflected. They are now answered.
+
+- **Curated file, NOT the model's own knowledge.** Left to itself it will fluently invent a deposit
+  norm or a legal requirement — about money and law, in a market it barely knows. `composeKnowledgeAnswer`
+  is given ONLY the matching entries and is forbidden from adding anything.
+- **No match means say so.** `knowledge_unknown` points at the office rather than improvising. There is
+  a smoke scenario asserting that asking about agency commission produces no invented percentage.
+- Nothing in the file may state a price, commission or legal guarantee — those are a human's job
+  (`wants_human`).
+- Answering is the goal; the prompt explicitly forbids pivoting to a sales question (doc §30).
+
+### Objections and escalation-by-fact
+- **`objection` ≠ `reject_property` ≠ `new_search`.** One listing / the whole set / new criteria — three
+  different situations, three different right answers. A *price* objection re-searches with the ceiling
+  set below the cheapest listing they just rejected, because asking "what's your budget?" after they
+  told you it's too expensive reads as not listening.
+- **"I'll think about it" stops selling.** No viewing pitch, no qualifying question, flow left intact.
+- **Repeated misunderstanding escalates on a FACT, not an inferred emotion.** Three consecutive
+  `NOT_UNDERSTOOD` events → hand to a human. Emotion detection was deliberately NOT built: "we have
+  failed three times" is verifiable, "they sound frustrated" is a guess, and both were meant to feed
+  the same branch.
+
 ### Scoring, escalation and notifications
 - **`leadScoring.js` is pure code.** Every point traces to something the lead actually did, so "why is
   this lead hot?" has an answer. The blueprint's "+10 for providing a phone number" is deliberately

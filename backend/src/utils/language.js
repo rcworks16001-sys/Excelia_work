@@ -142,6 +142,18 @@ const BOT_STRINGS = {
         fr: "Avec plaisir ! N'hésitez pas à m'écrire si vous avez besoin d'autre chose.",
         en: "You're welcome! Feel free to message me any time if you need anything else.",
     },
+    // Used when a general property question matched nothing in the knowledge
+    // base. Admitting ignorance and pointing at a human beats improvising an
+    // answer about deposits, contracts or land law.
+    knowledge_unknown: {
+        fr: "Je préfère ne pas vous répondre de travers là-dessus. Un conseiller EXCELIA pourra vous l'expliquer précisément au +228 91062626. En attendant, puis-je vous aider à trouver un bien ?",
+        en: "I'd rather not give you a half-right answer on that. An EXCELIA advisor can explain it properly on +228 91062626. In the meantime, can I help you find a property?",
+    },
+    // Fallback when a lead pushes back on everything shown.
+    objection_ack: {
+        fr: "Je comprends. Dites-moi ce qui conviendrait mieux et je regarde ce qu'on a d'autre.",
+        en: "I understand. Tell me what would work better and I'll see what else we have.",
+    },
     // Prefixes the deterministic comparison table.
     comparison_intro: {
         fr: 'Voici les deux côte à côte :',

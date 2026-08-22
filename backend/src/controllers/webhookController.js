@@ -10,9 +10,10 @@ const {
     getProfile, mergeProfile, recordShownListings, recordInterest, recordRejectionReason,
     profileToSearchFilters, flagForHuman, refreshLeadSignals,
 } = require('./leadProfileController');
-const { recordEvent, EVENT_TYPES } = require('./leadEventController');
+const { recordEvent, countTrailingEvents, EVENT_TYPES } = require('./leadEventController');
 const { createNotification } = require('./notificationController');
 const { ACTIONS, nextBestAction } = require('../utils/nextBestAction');
+const { findKnowledge, knowledgeBlock } = require('../utils/knowledge');
 const {
     composeResultsIntro,
     composeNoResults,
@@ -22,6 +23,8 @@ const {
     composeHandoff,
     composeAskRejectionReason,
     composeComparison,
+    composeKnowledgeAnswer,
+    composeObjection,
     composeLanguageSwitch,
     composeClosing,
     composeBookingPrompt,
@@ -191,6 +194,9 @@ const sendWhatsAppLocation = async (to, latitude, longitude, name, address) => {
 // How many listing cards a search reply shows. Deliberately equal to
 // MAX_LISTINGS_WITH_PHOTOS: they were 10 and 3, so a lead could receive ten
 // text cards and photos for only the first three, with nothing explaining why.
+// After this many consecutive failures to understand a reply, stop rephrasing
+// and get a person involved (doc §22, "repeated misunderstanding").
+const REPEATED_MISUNDERSTANDING_LIMIT = 3;
 const MAX_LISTINGS_SHOWN = 3;
 const MAX_LISTINGS_WITH_PHOTOS = 3;
 const MAX_PHOTOS_PER_LISTING = 2;
@@ -265,7 +271,11 @@ const NLUSchema = z.object({
     // questions. They are ONE intent because they all produce one action —
     // hand over. The specific reason rides along in handoff_reason instead of
     // splitting this into four intents that branch identically.
-    intent: z.enum(['search', 'off_topic', 'greeting', 'closing', 'booking_intent', 'wants_human', 'unclear']),
+    // 'general_question' is about how property WORKS here (cour commune, titre
+    // foncier, deposits, viewings) as opposed to a specific listing. These used
+    // to fall into off_topic and get deflected — a lead asking a perfectly
+    // sensible question was told the bot only does property search.
+    intent: z.enum(['search', 'general_question', 'off_topic', 'greeting', 'closing', 'booking_intent', 'wants_human', 'unclear']),
     // Only meaningful when intent is 'wants_human'.
     handoff_reason: z.enum(['asked_for_agent', 'negotiation', 'complaint', 'legal_or_financial']).nullable(),
     // Explicit request to be spoken to in another language, in ANY phrasing
@@ -371,6 +381,7 @@ Field guidance:
   * "booking_intent" — they say they want to book/visit/see a property but have NOT identified which one ("yes I want to book an appointment", "je veux visiter"). Do NOT classify this as "unclear".
   * "closing" — thanks, goodbyes, acknowledgements that end an exchange ("thank you", "merci", "ok great", "bye", "that's all"). NEVER classify these as "greeting".
   * "greeting" — an OPENING greeting with no property information ("Bonjour", "Hi"). If the conversation already has messages, a bare "hi" is usually still a greeting, but "thanks" is "closing".
+  * "general_question" — a question about how property works in Togo rather than about a specific listing: what a "cour commune" or "chambre salon" is, what a "titre foncier" is, deposits and advances, how a viewing works, what furnished means, what the neighbourhoods are like. Real estate, but not a search — do NOT classify these as off_topic.
   * "off_topic" — clearly unrelated to real estate (weather, jokes, chit-chat).
   * "wants_human" — they need a person, not a bot. Use for: asking to speak to someone ("can I talk to an agent?", "je veux parler à quelqu'un"); trying to negotiate price or terms ("can you lower the price?", "c'est négociable ?"); complaining about the agency or a property; or asking a legal/financial/contractual question (titre foncier disputes, contracts, loans, taxes). Prefer this over guessing whenever answering wrongly could mislead them about money or legal standing.
   * "unclear" — only if genuinely none of the above fit.
@@ -489,7 +500,13 @@ const ViewingSelectionSchema = z.object({
     // 'decline', which ends the whole booking. "I don't like the first one" is
     // a refinement signal, not a goodbye; treating it as one used to end the
     // conversation on someone who was still shopping.
-    decision: z.enum(['decline', 'select', 'express_interest', 'reject_property', 'compare', 'wants_to_book', 'new_search', 'request_media', 'question', 'greeting', 'closing', 'wants_human', 'unclear']),
+    // 'objection' is pushback on the WHOLE set with no listing named and no new
+    // criteria given ("these are all too expensive", "I'll think about it").
+    // Distinct from reject_property (one listing) and new_search (they stated
+    // something new) because the right answer differs: a price objection
+    // deserves a concrete cheaper option, not another question.
+    decision: z.enum(['decline', 'select', 'express_interest', 'reject_property', 'objection', 'compare', 'wants_to_book', 'new_search', 'request_media', 'question', 'greeting', 'closing', 'wants_human', 'unclear']),
+    objection_type: z.enum(['price', 'location', 'size', 'thinking_about_it']).nullable(),
     selected_number: z.number().int().nullable(),
     // For 'compare': which listings they want set side by side. Two or three;
     // beyond that a WhatsApp message stops being readable.
@@ -501,7 +518,7 @@ const ViewingSelectionSchema = z.object({
 });
 
 const extractViewingSelection = async (text, listingCount, history = []) => {
-    const fallback = { decision: 'unclear', selected_number: null, compare_numbers: null, handoff_reason: null, rejection_reason: null };
+    const fallback = { decision: 'unclear', selected_number: null, compare_numbers: null, handoff_reason: null, rejection_reason: null, objection_type: null };
     if (!text || !text.trim()) return fallback;
 
     try {
@@ -517,6 +534,7 @@ const extractViewingSelection = async (text, listingCount, history = []) => {
   * "new_search" — they are changing or refining what they're looking for rather than picking from the list ("actually under 400000", "do you have apartments instead?", "what about Bè?", "something cheaper"). This is a NEW requirement, not a selection.
   * "request_media" — they are asking to SEE more of a specific listing rather than to book it ("can you share some photos of 1", "more pictures of the second one", "send me the video", "où se trouve le 2 ?"). Set selected_number to the listing they mean. Wanting to look at photos is NOT the same as choosing to book a viewing.
   * "question" — they are ASKING something about a listing rather than choosing ("what is the price of 2?", "how many bedrooms?", "where is it?"). Set selected_number if they name one.
+  * "objection" — they push back on ALL of them without naming one and without giving new criteria ("these are all too expensive", "it's out of my price range", "too far from everything", "I'll think about it", "je vais réfléchir"). Set objection_type: "price", "location", "size", or "thinking_about_it". If they name a specific listing use "reject_property"; if they state a new requirement use "new_search".
   * "compare" — they want two or three listings set side by side ("compare 1 and 3", "what's the difference between the first two?", "quelle est la différence entre 1 et 2 ?"). Set compare_numbers to the listing numbers they named. If they say "compare them" without naming any, set compare_numbers to all of them.
   * "reject_property" — they DISLIKE one of the listings shown, without ending the conversation ("I don't like the first one", "not the second one", "le 1 ne me plaît pas", "the villa is too expensive"). Set selected_number. Set rejection_reason if they say WHY ("too expensive" -> "price", "too far"/"wrong area" -> "location", "too small"/"not enough rooms" -> "size", "I wanted an apartment" -> "type"); leave rejection_reason null if they just said no. This is NOT a decline — they are still looking.
   * "wants_human" — they need a person: asking to speak to an agent, trying to NEGOTIATE the price or terms ("can you lower the price?", "c'est négociable ?", "any discount?"), complaining, or asking a legal/financial/contractual question. Set handoff_reason. Note this is different from "question" — asking what the price IS is a question; asking for it to be CHANGED is a negotiation only a person can handle.
@@ -761,6 +779,41 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
         };
     }
 
+    // Pushback on the whole set. §32: an objection is information, not a
+    // rejection — the flow stays alive and we narrow the gap.
+    if (selection.decision === 'objection') {
+        await recordEvent(leadId, EVENT_TYPES.OBJECTION_RAISED, {
+            metadata: { type: selection.objection_type || 'unstated' },
+        });
+
+        // Price is the one objection we can act on without asking anything:
+        // they've seen these prices and said they're too high, so the useful
+        // reply is cheaper options, not "what's your budget?" — a question
+        // they'd reasonably feel they just answered.
+        if (selection.objection_type === 'price') {
+            const shown = (await Promise.all(pendingListingIds.map((id) => getPropertyById(id)))).filter(Boolean);
+            const cheapestShown = shown.length ? Math.min(...shown.map((p) => p.price)) : null;
+            if (cheapestShown) {
+                // Strictly below the cheapest they rejected — anything at or
+                // above it is the same answer again.
+                await mergeProfile(leadId, {
+                    deltas: { budget_max: Math.max(1, cheapestShown - 1) },
+                    clearedFields: ['budget_stretch_max'],
+                });
+            }
+            // null hands back to the search path, which re-ranks with the
+            // lowered ceiling.
+            return null;
+        }
+
+        return {
+            text: await composeObjection({
+                lang, userMessage: text, objectionType: selection.objection_type, history,
+            }),
+            mediaListings: null,
+        };
+    }
+
     // "Compare 1 and 3". Stays in the selection state — comparing is how they
     // decide, not a decision. The table is rendered from the DB rows; only the
     // one-line steer underneath is composed.
@@ -924,6 +977,21 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
     }
 
     // Genuinely couldn't tell which listing they meant.
+    await recordEvent(leadId, EVENT_TYPES.NOT_UNDERSTOOD);
+
+    // Three in a row means rephrasing is not working, and asking a fourth time
+    // is just wasting their patience — one of the doc's explicit escalation
+    // triggers. Based on a fact (we failed three times) rather than an
+    // inference about how they feel.
+    const consecutiveFailures = await countTrailingEvents(leadId, EVENT_TYPES.NOT_UNDERSTOOD, 5);
+    if (consecutiveFailures >= REPEATED_MISUNDERSTANDING_LIMIT) {
+        await flagForHuman(leadId, 'repeated_misunderstanding');
+        return {
+            text: await composeHandoff({ lang, userMessage: text, reason: 'repeated_misunderstanding', history }),
+            mediaListings: null,
+        };
+    }
+
     return {
         text: await composeSelectionUnclear({ lang, userMessage: text, listingCount: pendingListingIds.length, history }),
         mediaListings: null,
@@ -1216,6 +1284,22 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                     lang, userMessage: text, reason: filters.handoff_reason, history,
                 });
                 isGreetingReply = true; // a handover is not a moment to also welcome them
+            } else if (action === ACTIONS.ANSWER_QUESTION) {
+                // Answer from the curated knowledge base, or admit we don't
+                // know. Never from the model's own sense of how Togolese
+                // property law and deposits work.
+                const facts = findKnowledge(text);
+                replyBody = facts.length
+                    ? await composeKnowledgeAnswer({
+                        lang, userMessage: text, facts: knowledgeBlock(facts, lang), history,
+                    })
+                    : BOT_STRINGS.knowledge_unknown[lang];
+                await recordEvent(leadId, EVENT_TYPES.QUESTION_ANSWERED, {
+                    metadata: { matched: facts.map((f) => f.id) },
+                });
+                // Answering is not a welcome, and a question is not a reason to
+                // start a fresh introduction.
+                isGreetingReply = true;
             } else if (action === ACTIONS.SWITCH_LANGUAGE) {
                 // They only asked to change language — confirm in the NEW
                 // language, rather than treating "now please english" as

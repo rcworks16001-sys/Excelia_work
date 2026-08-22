@@ -249,6 +249,70 @@ Write the redirect.`;
     return callComposer(system, user, BOT_STRINGS.off_topic[lang]);
 };
 
+// ── composeObjection ──
+// They pushed back on everything shown. §32: an objection is information, not
+// a rejection — the useful reply narrows the gap rather than restating the
+// pitch or asking them to repeat themselves.
+//
+// The price case is handled by re-searching instead (see the handler), so this
+// covers the ones where we genuinely need to know more, plus the "I'll think
+// about it" case where the correct move is to stop selling.
+const OBJECTION_TASK = {
+    location: 'They said the areas do not work for them. Ask which area or which part of town would suit them better — do not defend the ones you showed.',
+    size: 'They said the properties are not the right size. Ask how many bedrooms they actually need.',
+    thinking_about_it: 'They want time to think. Say warmly that that is completely fine, and that you will be here when they are ready. Do NOT push, do NOT ask a qualifying question, and do NOT offer a viewing. Offer at most to keep looking if anything else comes up.',
+};
+
+const composeObjection = async ({ lang, userMessage, objectionType, history }) => {
+    const system = `${BASE_PERSONA}
+
+Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
+
+Your task: the customer has pushed back on everything you showed them. ${OBJECTION_TASK[objectionType] || 'Acknowledge their reaction and ask ONE question that would help you find something closer to what they want.'}
+
+Take it graciously — they are telling you something useful, not complaining. Do NOT argue, do NOT re-describe the properties, do NOT apologise more than once, and do NOT repeat a question you have already asked. One or two short sentences.${historyBlock(history)}`;
+
+    const user = `The customer wrote: "${userMessage}"
+
+Write the reply.`;
+
+    return callComposer(system, user, BOT_STRINGS.objection_ack[lang]);
+};
+
+// ── composeKnowledgeAnswer ──
+// Answers a general question about how property works in Togo, using ONLY the
+// curated facts passed in (utils/knowledge.js).
+//
+// This is the strictest prompt in the file, because the failure mode is the
+// worst: fluently inventing a deposit norm or a legal requirement, about money
+// and law, in a market the model knows little about. No matching facts means
+// say so — the fallback exists precisely so "I don't know" is always available.
+//
+// Per the doc's §30: answering IS the goal here. It must not pivot to selling.
+const composeKnowledgeAnswer = async ({ lang, userMessage, facts, history }) => {
+    const system = `${BASE_PERSONA}
+
+Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
+
+Your task: answer the customer's question about how property works in Togo, using ONLY the verified facts below. Put them in your own words, briefly and warmly.
+
+VERIFIED FACTS — this is everything you know on the subject:
+${facts}
+
+Absolute rules:
+- Answer ONLY from the facts above. Do NOT add detail, figures, timeframes, legal specifics or local custom from your own knowledge, however confident you feel — being wrong about money or law here would genuinely harm this customer.
+- If the facts above do not actually answer what they asked, say plainly that you'd rather have a colleague confirm it, and give the office number +228 91062626.
+- Do NOT quote a price, a commission, a deposit amount, or any number that is not written above.
+- Answer the question and stop. Do NOT pitch a property or push a viewing — they asked something reasonable and deserve an answer, not a sales turn. A single light offer to help further is fine only if it fits naturally.
+- 2-4 short sentences.${historyBlock(history)}`;
+
+    const user = `The customer asked: "${userMessage}"
+
+Write the answer.`;
+
+    return callComposer(system, user, BOT_STRINGS.knowledge_unknown[lang]);
+};
+
 // ── composeComparison ──
 // The one line UNDER a comparison table that says which way to lean. This is
 // the difference between dumping data and actually helping.
@@ -314,6 +378,7 @@ const REASON_CONTEXT = {
     negotiation: 'They want to negotiate the price or terms — only the agency can discuss that.',
     complaint: 'They are unhappy about something. Acknowledge it warmly and without being defensive; do not argue or explain it away.',
     legal_or_financial: 'They asked a legal, contractual or financial question that must not be answered speculatively.',
+    repeated_misunderstanding: 'You have failed to understand them several times running. Do not ask them to rephrase again — apologise once, briefly, and hand over.',
 };
 
 const composeHandoff = async ({ lang, userMessage, reason, history }) => {
@@ -490,6 +555,8 @@ module.exports = {
     composeHandoff,
     composeAskRejectionReason,
     composeComparison,
+    composeKnowledgeAnswer,
+    composeObjection,
     composeUnsupportedMedia,
     composeLanguageSwitch,
     composeClosing,

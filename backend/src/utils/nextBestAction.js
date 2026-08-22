@@ -31,6 +31,10 @@ const ACTIONS = {
     // where a confident wrong answer costs the agency far more than a pause.
     HANDOFF: 'HANDOFF',
 
+    // Answer a question about how property works here. Sometimes the right
+    // next action is simply to answer, not to steer toward a booking.
+    ANSWER_QUESTION: 'ANSWER_QUESTION',
+
     SWITCH_LANGUAGE: 'SWITCH_LANGUAGE',
     CLOSE: 'CLOSE',
     ASK_WHAT_THEY_WANT: 'ASK_WHAT_THEY_WANT',
@@ -93,6 +97,14 @@ const RULES = [
         // language anyway, so answering is better than just acknowledging.
         when: (ctx) => Boolean(ctx.languageSwitchRequest) && ctx.intent !== 'search',
         action: ACTIONS.SWITCH_LANGUAGE,
+    },
+    {
+        name: 'general_question',
+        // Above closing and greeting: a real question deserves an answer, not
+        // a pleasantry. Below wants_human, because a legal or financial
+        // question must reach a person rather than the knowledge base.
+        when: (ctx) => ctx.intent === 'general_question',
+        action: ACTIONS.ANSWER_QUESTION,
     },
     {
         name: 'closing',

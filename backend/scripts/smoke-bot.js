@@ -363,6 +363,7 @@ const run = async () => {
         const cases = [
             { pendingAction: 'awaiting_viewing_datetime', intent: 'greeting' },
             { pendingAction: null, intent: 'wants_human' },
+            { pendingAction: null, intent: 'general_question' },
             { pendingAction: null, intent: 'greeting', languageSwitchRequest: 'en' },
             { pendingAction: null, intent: 'closing' },
             { pendingAction: null, intent: 'booking_intent' },
@@ -377,7 +378,7 @@ const run = async () => {
 
         // The invariant that has broken this project twice: nothing outranks an
         // active booking. Not a greeting, not a language switch, not a search.
-        const intents = ['greeting', 'closing', 'off_topic', 'search', 'booking_intent', 'unclear', 'wants_human'];
+        const intents = ['greeting', 'closing', 'off_topic', 'search', 'booking_intent', 'unclear', 'wants_human', 'general_question'];
         const leaks = intents.filter((intent) => nextBestAction({
             pendingAction: 'awaiting_viewing_datetime', intent, languageSwitchRequest: 'en',
         }).action !== ACTIONS.DELEGATE_BOOKING_FLOW);
@@ -509,6 +510,44 @@ const run = async () => {
         // inventing a preference for them.
         check('asks what matters instead of guessing a priority',
             /\?/.test(r.reply), r.reply.slice(-160));
+    });
+
+    // ── Scenarios 35-38: knowledge and objections ──
+
+    await scenario('KNOWLEDGE: a property question is answered, not deflected', async (p) => {
+        const r = await send(p, 'what is a cour commune?');
+        check('actually answered it', /courtyard|cour/i.test(r.reply), r.reply.slice(0, 180));
+        // It used to be classified off_topic and brushed aside.
+        check('did not brush it off as off-topic',
+            !/specialized in real estate search|spécialisé dans la recherche/i.test(r.reply), r.reply.slice(0, 180));
+    });
+
+    await scenario('KNOWLEDGE: admits ignorance rather than inventing law or money facts', async (p) => {
+        // Nothing in the knowledge base covers agency commission. The bot must
+        // NOT improvise a percentage — being fluently wrong about money is the
+        // whole reason this layer is curated rather than model-generated.
+        const r = await send(p, 'what percentage commission does the agency charge on a sale?');
+        check('quoted no invented percentage', !/\d+\s*%/.test(r.reply), r.reply.slice(0, 200));
+    });
+
+    await scenario('OBJECTION: "too expensive" returns cheaper options, not another question', async (p) => {
+        await send(p, 'I want to rent a villa in Lome');
+        const r = await send(p, 'these are all too expensive for me');
+        check('came back with listings rather than interrogating them',
+            /F CFA/.test(r.reply), r.reply.slice(0, 200));
+
+        const prof = await getProfile((await getLeadState(p)).id);
+        check('budget ceiling lowered from what they rejected',
+            prof.budget_max !== null && prof.budget_max < 350000, `budget_max=${prof.budget_max}`);
+    });
+
+    await scenario('OBJECTION: "I\'ll think about it" backs off instead of pushing', async (p) => {
+        await send(p, 'I want to rent a villa in Lome');
+        const r = await send(p, 'I will think about it');
+        check('did not push a viewing',
+            !/book|viewing|visite|réserver/i.test(r.reply), r.reply);
+        check('flow left intact for their return',
+            r.pendingAction === 'awaiting_viewing_selection', `pending=${r.pendingAction}`);
     });
 
     console.log(`\n${'='.repeat(72)}`);

@@ -20,6 +20,9 @@ const EVENT_TYPES = {
     PROPERTY_LIKED: 'PROPERTY_LIKED',
     PROPERTY_REJECTED: 'PROPERTY_REJECTED',
     PROPERTIES_COMPARED: 'PROPERTIES_COMPARED',
+    QUESTION_ANSWERED: 'QUESTION_ANSWERED',
+    OBJECTION_RAISED: 'OBJECTION_RAISED',
+    NOT_UNDERSTOOD: 'NOT_UNDERSTOOD',
     MEDIA_REQUESTED: 'MEDIA_REQUESTED',
     SITE_VISIT_REQUESTED: 'SITE_VISIT_REQUESTED',
     SITE_VISIT_BOOKED: 'SITE_VISIT_BOOKED',
@@ -62,4 +65,27 @@ const getEventsForLead = async (leadId, limit = 50) => {
     return result.rows;
 };
 
-module.exports = { recordEvent, getEventsForLead, EVENT_TYPES };
+// ── countTrailingEvents(leadId, eventType, window) ──
+// How many of this lead's most recent `window` events are all `eventType`,
+// counting back from the latest. Returns 0 as soon as a different event breaks
+// the run.
+//
+// Used for the "repeated misunderstanding" escalation: a lead the bot has
+// failed to understand three times running is not having a conversation, and
+// no amount of rephrasing will fix it — that is a person's job. Deliberately
+// derived from events rather than inferred emotion: "I have not understood the
+// last three messages" is a fact, where "they sound frustrated" is a guess.
+const countTrailingEvents = async (leadId, eventType, window = 5) => {
+    const result = await pool.query(
+        'SELECT event_type FROM lead_events WHERE lead_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2',
+        [leadId, window]
+    );
+    let run = 0;
+    for (const row of result.rows) {
+        if (row.event_type !== eventType) break;
+        run += 1;
+    }
+    return run;
+};
+
+module.exports = { recordEvent, getEventsForLead, countTrailingEvents, EVENT_TYPES };
