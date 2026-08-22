@@ -45,7 +45,7 @@ NOT in this build: owner self-listing portal, subscription/billing, Mobile Money
 - **Live-ish conversation updates** — Lead Detail polls `GET /leads/:id` every 5s while the tab is visible (paused on `document.visibilitychange`), so a new WhatsApp message shows up without a manual refresh. No WebSocket infra was added — polling is the pragmatic fit for this stack. Careful merge logic so a poll never wipes out an admin's just-sent reply (which is local-only, not persisted — see above).
 - **WhatsApp location sending** — `sendWhatsAppLocation()` built; `sendListingMedia()` (renamed from `sendListingPhotos`) now fans out photos → video (top listing only) → location pin per search result. Coordinates are still neighbourhood-level demo approximations, not exact addresses.
 - **Full chatbot conversational rebuild** — this was the largest piece of work and deserves its own section below ("Conversational bot architecture"). Short version: the bot used to be stateless per message (no memory, hardcoded reply templates, a booking flow that silently destroyed itself on any off-script message) and is now context-aware, composes genuinely conversational replies via Claude while never letting the model author a fact, and survives interruptions (questions, photo requests, greetings, language-switch requests) mid-booking without losing state.
-- **`npm run smoke-bot`** — a real regression suite (18 scenarios and counting) that drives the actual exported bot handlers against the DB with disposable leads. Exists because a static NLU test alone is not enough to catch a broken booking flow — see "Conversational bot architecture" for why this is mandatory to run after any bot change.
+- **`npm run smoke-bot`** — a real regression suite (42 scenarios / 104 checks as of the last count — check the file, it keeps growing) that drives the actual exported bot handlers against the DB with disposable leads. Exists because a static NLU test alone is not enough to catch a broken booking flow — see "Conversational bot architecture" for why this is mandatory to run after any bot change.
 
 ### ✅ The conversational rearchitecture (7 phases, all done)
 
@@ -63,9 +63,22 @@ Full detail is in "Conversational bot architecture" below — this is the index.
 | **5** | `knowledge.js` (Togo property Q&A), objection handling, escalation on repeated misunderstanding |
 | **6** | Lead profile panel + activity timeline, analytics page |
 
-**Test suite: 18 → 38 scenarios / 97 checks.** `npm run smoke-bot -- 30-34` runs a subset while
+**Test suite: 18 → 42 scenarios / 104 checks.** `npm run smoke-bot -- 30-34` runs a subset while
 iterating (~15 Claude calls); **the full run is the pre-commit gate** and prints "PARTIAL RUN" when
 filtered so a subset can never be mistaken for it.
+
+**Also done and pushed, post-Phase-6 (2026-08-23), two client requests:**
+- **Qualifying questions ask city before neighbourhood, never the reverse.** One permanent rule in
+  `BASE_PERSONA` (`replyComposer.js`): never ask for a neighbourhood before the city is known.
+- **The bot now captures the lead's name.** Asked once, only where there's a real reason to know it:
+  alongside the date/time question when booking a viewing (`composeAskDatetime`'s `needsName` flag),
+  and ONLY when no name is already on file (`getOrCreateLead` now returns the resolved `name`; WhatsApp
+  supplying one, or an earlier turn already capturing one, both suppress the ask). A re-ask
+  (`isReAsk`) must NEVER ask for the name again — left to inference the model re-asks anyway (a real
+  bug this caught), so it's an explicit instruction in the prompt. Also captured passively (`stated_name`
+  on the main NLU) if a lead introduces themselves unprompted. All writes go through
+  `updateLeadNameIfMissing()` (COALESCE — fills a blank only, never overwrites). Scenarios 41-42 in
+  `smoke-bot.js`.
 
 ### Blueprint sections deliberately NOT built — don't "finish" these without asking
 - **§29 follow-up automation** — deferred by the client until after the demo. Blocked on a real Meta
@@ -82,18 +95,6 @@ filtered so a subset can never be mistaken for it.
   `resend` is still an unused dependency.
 
 ### ⏳ Actually pending
-- **Client request (2026-08-23): qualifying questions ask city before neighbourhood, and the bot now
-  captures the lead's name.** Location ordering is enforced by one rule in `BASE_PERSONA`
-  (`replyComposer.js`) — never ask for a neighbourhood before the city is known. Name capture happens
-  in exactly one place, once: `composeAskDatetime`'s `needsName` flag asks for it alongside the date
-  question, ONLY on the first ask, and ONLY when `leadName` (threaded from `getOrCreateLead`, which now
-  returns `name`) is null — i.e. WhatsApp gave no profile name and nothing has captured one yet. A
-  re-ask (`isReAsk`) must NEVER ask for the name again, even though the model can see the earlier
-  unanswered ask in history — this has to be an explicit instruction in the prompt, not left to
-  inference, or the model reliably re-asks anyway (caught by a smoke scenario). `stated_name` is also
-  extracted passively by the main NLU, so a lead who introduces themselves unprompted is captured for
-  free. All writes go through `updateLeadNameIfMissing()` (COALESCE — can only fill a blank, never
-  overwrite a name already on file). See scenarios 41-42 in `smoke-bot.js`.
 - **Location coordinates are neighbourhood-level approximations, not exact addresses.** Replace with real coordinates when the client supplies them.
 - **Only 1 of 13 listings has a video** (Baguida villa) — the client has only sent one video file so far. The bot will only visibly demo video-sending if that specific listing comes up in a search.
 - **Known minor debt, not fixed:** the frontend re-implements `formatXOF()`/`formatDate()` independently in 3 separate page files (properties, lead detail, appointments) instead of one shared utility — violates the spirit of the "one shared utility" rule below, which was written with only the backend's `utils/format.js` in mind. Worth consolidating into a `frontend/lib/format.js` next time one of those files is touched.
@@ -443,21 +444,35 @@ Two hard rules baked into `BASE_PERSONA` in `utils/replyComposer.js`:
 - **Current columns beyond the original schema, all added via idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`:**
   - `properties.description_en` — cached one-time English translation (see "Property description translation" below).
   - `properties.video_url` — single optional walkthrough video URL (not a gallery like `photos`).
+  - `properties.listing_status` (`available`/`reserved`/`rented`, default `available`) + `properties.reserved_for` — availability control from the dashboard. `listing_status = 'available'` is the ONE hard filter the bot's ranking never relaxes.
+  - `properties.transaction` (`rent`/`sale`, default `rent`) — first-class rent-vs-sale field; content-idempotent backfill sets `terrain` rows to `'sale'`.
   - `appointments.requested_date` / `appointments.requested_time_of_day` — capture a resolvable date even when the exact clock time couldn't be determined ("demain matin"), without ever inventing a fake time. `requested_datetime` keeps its original strict meaning (exact datetime only).
   - `leads.notes` — free-text admin notes, separate from `conversations`, never touched by the bot.
+  - `leads.pending_set_at` — timestamp the current booking pending-state was entered; drives the 24h TTL (`PENDING_STATE_TTL_HOURS` in `leadController.js`) so a lead gone quiet mid-booking isn't parked forever.
+- **Three tables added by the conversational rearchitecture (see "Conversational bot architecture"), all `CREATE TABLE IF NOT EXISTS`:**
+  - `lead_profiles` — 1:1 with `leads` (`ON DELETE CASCADE`), owned solely by `leadProfileController.js`. Structured requirement (transaction/type/city/neighbourhood/bedroom range/budget+stretch/purpose/timeline), interest tracking (liked/rejected property ids, rejection reasons), scoring (`lead_score`, `lead_temperature`), and handoff flags (`needs_human`, `handoff_reason`, `handoff_at`).
+  - `lead_events` — behavioural history (`SEARCH_PERFORMED`, `PROPERTY_REJECTED`, `BECAME_HOT`, etc.), owned by `leadEventController.js`. `property_id` is `ON DELETE SET NULL`, not CASCADE — deleting a listing must not erase a lead's history.
+  - `notifications` — the dashboard bell's data, owned by `notificationController.js`. `type` is `needs_human`/`hot_lead`/`appointment_booked`; `read_at` drives the unread badge; new alerts of the same type dedupe within a window so the bell doesn't become noise.
 
 ---
 
 ## Property search logic
 
-The bot extracts these fields from free text using Claude:
-- `city` (e.g. Lomé, Noèpé)
-- `neighbourhood` (e.g. Adidogomé, Avédji)
+The bot extracts these fields from free text using Claude (`NLUSchema` in `webhookController.js`):
+- `city` (e.g. Lomé, Noèpé), `neighbourhood` (e.g. Adidogomé, Avédji)
 - `type` (chambre_salon, appartement, villa, terrain, mini_villa, appartement_meuble)
-- `price_max` (integer in XOF)
-- `bedrooms` (integer, nullable)
+- `transaction` (rent/sale — null unless actually signalled; guessing 'sale' would wrongly exclude most of the catalogue)
+- `price_max` (integer in XOF) + `budget_stretch_max` (the absolute ceiling if they signal flexibility — "I could stretch to 90")
+- `bedrooms` / `bedrooms_min` / `bedrooms_max` (a range, e.g. "2 or 3 bedrooms", not just an exact count)
+- `purpose` (self_use/investment/rental_income), `timeline` (immediate/within_1_month/within_3_months/later/exploring)
+- `intent` (search/general_question/off_topic/greeting/closing/booking_intent/wants_human/unclear) and `handoff_reason` when `wants_human`
+- `cleared_fields` — fields the lead explicitly retracted (the third state in the profile merge — see "The lead profile is the bot's real memory")
+- `stated_name` — captured passively if a lead volunteers their own name unprompted
 
-Two search functions in `propertyController.js`, sharing one `buildQuery()` helper (never duplicate the query logic):
+These are NOT re-extracted fresh each turn — they merge into the persistent `lead_profiles` row (see
+"The lead profile is the bot's real memory" below), which is what the search actually runs against.
+
+Two search functions in `propertyController.js` — no longer sharing one query builder, and that's deliberate (see below):
 - **`searchProperties(filters)`** — the dashboard/exact-match contract. Match on all provided fields (`ILIKE` for city/neighbourhood, exact for type/bedrooms, `price <= price_max * 1.1`). If no results, relax neighbourhood once and return the 3 closest. Kept simple and predictable for any future dashboard search UI.
 - **`rankPropertiesForLead(filters, { limit, lang, rejectedIds })`** — what the **bot** actually uses. Fetches the available catalogue and scores every listing via `utils/propertyMatcher.js`, returning the best few with per-listing `matchReasons`. It never dead-ends (a near miss ranks lower rather than being filtered out) and never silently substitutes (the mismatch is printed as `✗`). It replaced a progressive-relaxation cascade — see "Property matching is scored, not filtered" for why a weighted sort over hard-filtered rows cannot work.
 
@@ -579,7 +594,7 @@ excelia/
 │   │   ├── bulk-upload-photos.js      ← uploads backend/photos-to-upload/<id>/ photos AND one video per folder to Cloudinary, updates DB
 │   │   ├── hash-password.js           ← standalone CLI: masked password prompt, prints its bcrypt hash
 │   │   ├── backfill-translations.js   ← re-runnable: fills properties.description_en + resolves old appointments' vague requested dates
-│   │   └── smoke-bot.js               ← REQUIRED after any bot change: 18+ scenarios against the real handlers, disposable leads, no WhatsApp sends (npm run smoke-bot)
+│   │   └── smoke-bot.js               ← REQUIRED after any bot change: 42+ scenarios against the real handlers, disposable leads, no WhatsApp sends (npm run smoke-bot [-- range], e.g. `-- 30-34`; full run is the pre-commit gate)
 │   ├── photos-to-upload/              ← gitignored, local-only source images/video for the bulk script
 │   └── src/
 │       ├── db/
@@ -589,9 +604,13 @@ excelia/
 │       ├── middleware/
 │       │   └── auth.js                ← authenticateAdmin middleware
 │       ├── controllers/
-│       │   ├── webhookController.js   ← WhatsApp inbound + ALL bot logic: NLU (extractSearchFilters/extractViewingSelection/extractAppointmentDateTime), booking-flow handlers, sendWhatsAppMessage/Image/Video/Location, sendListingMedia
-│       │   ├── propertyController.js  ← searchProperties() (dashboard) / rankPropertiesForLead() (bot), getKnownLocations(), create/remove, photo+video upload/delete, listing status
-│       │   ├── leadController.js      ← lead CRUD, getRecentConversation() (bot memory), booking pending-flow state, status pipeline, updateNotes, sendReply
+│       │   ├── webhookController.js   ← WhatsApp inbound + ALL bot logic: NLU (extractSearchFilters/extractViewingSelection/extractAppointmentDateTime), the NBA branch dispatch, booking-flow handlers, sendWhatsAppMessage/Image/Video/Location, sendListingMedia. processInboundMessage() is the whole bot minus transport - handleMessage is envelope + idempotency + send only.
+│       │   ├── propertyController.js  ← searchProperties() (dashboard, via buildQuery()) / rankPropertiesForLead() (bot, via utils/propertyMatcher.js), getKnownLocations(), create/remove, photo+video upload/delete, listing status
+│       │   ├── leadController.js      ← lead CRUD, getRecentConversation() (bot memory), booking pending-flow state + TTL, updateLeadNameIfMissing(), forward-only status pipeline (advanceLeadStatus), updateNotes, sendReply
+│       │   ├── leadProfileController.js ← owns lead_profiles: mergeProfile() (three-state merge), flagForHuman(), refreshLeadSignals() (scoring + status advance each turn), profileToSearchFilters()
+│       │   ├── leadEventController.js ← owns lead_events: recordEvent(), getEventsForLead(), countTrailingEvents() (repeated-misunderstanding escalation)
+│       │   ├── notificationController.js ← owns notifications: createNotification() (deduped), list/markRead/markAllRead for the dashboard bell
+│       │   ├── analyticsController.js ← the documented exception to "no dashboardController" - cross-resource by nature (leads+events+properties+appointments), so it belongs to no single one
 │       │   ├── appointmentController.js ← booking logic, updateStatus
 │       │   └── authController.js      ← login endpoint (username/password → ADMIN_TOKEN)
 │       ├── routes/
@@ -599,22 +618,29 @@ excelia/
 │       │   ├── properties.js          ← includes create/delete, photo upload/delete, video upload/delete endpoints
 │       │   ├── leads.js               ← includes status PATCH, notes PATCH, reply POST
 │       │   ├── appointments.js        ← includes status PATCH
-│       │   └── auth.js
+│       │   ├── auth.js
+│       │   ├── notifications.js       ← list, read-all PATCH, per-id read PATCH
+│       │   └── analytics.js           ← single GET, the five-metric overview
 │       └── utils/
 │           ├── cloudinary.js          ← shared Cloudinary config — bulk script + dashboard uploads both import this
 │           ├── language.js            ← detectLanguage(), detectLanguageSwitchRequest() (regex fast-path), BOT_STRINGS (FR + EN fallbacks)
 │           ├── translate.js           ← translateToEnglish()/translateToFrench() — write-time-only, cached, never called per page-view
 │           ├── replyComposer.js       ← Claude-composed bot replies (see "Conversational bot architecture") — wrapper text only, never facts or claimed actions
-│           └── format.js              ← formatXOF(), maskPhone() (unused now, phone is unmasked)
+│           ├── format.js              ← formatXOF(), maskPhone() (unused now, phone is unmasked)
+│           ├── nextBestAction.js      ← the decision engine: pure, synchronous, ordered rule list - see "Decisions are made in code, not in a prompt"
+│           ├── propertyMatcher.js     ← soft matching + scoring + match reasons for the bot's search - see "Property matching is scored, not filtered"
+│           ├── knowledge.js           ← curated Togo property-market Q&A (cour commune, titre foncier, etc.) - see "The knowledge layer"
+│           └── leadScoring.js         ← pure, explainable lead scoring (hot/warm/qualified/cold) - see "Scoring, escalation and notifications"
 │
 └── frontend/
     ├── .env.local
     ├── .gitignore
     ├── components/
-    │   └── LanguageToggle.js          ← shared FR/EN pill, used by the dashboard nav AND the login page
+    │   ├── LanguageToggle.js          ← shared FR/EN pill, used by the dashboard nav AND the login page
+    │   └── NotificationBell.js        ← dashboard nav bell: unread badge, click-to-open-lead, mark read/all, 20s poll paused when hidden
     ├── lib/
     │   ├── api.js                     ← Axios instance with token from cookie
-    │   ├── statusConfig.js            ← lead pipeline stages AND appointment statuses, bilingual labels
+    │   ├── statusConfig.js            ← lead pipeline stages, appointment statuses, listing status, transaction, lead temperature - all bilingual label configs
     │   ├── dashboardStrings.js        ← FR/EN dictionary for dashboard UI chrome
     │   └── useDashboardLanguage.js    ← localStorage-backed dashboard language hook
     └── app/
@@ -623,16 +649,17 @@ excelia/
         ├── globals.css
         ├── login/page.js              ← username/password login, client logo
         └── dashboard/
-            ├── layout.js              ← nav, language toggle, auth guard
-            ├── page.js                ← Leads overview: search, status filter, inline status dropdown per row
-            ├── leads/[id]/page.js     ← Lead detail: status editor, live-polled conversation, reply-to-lead, notes (autosave)
-            ├── properties/page.js     ← listings: search, type filter, Add/Delete, multi-photo + video upload, media lightbox
-            └── appointments/page.js   ← search, status filter, status dropdown per row, timezone-correct dates
+            ├── layout.js              ← nav (incl. Analytics), language toggle, notification bell, auth guard
+            ├── page.js                ← Leads overview: search, status filter, inline status dropdown, hot/needs-callback badges
+            ├── leads/[id]/page.js     ← Lead detail: status editor, live-polled conversation, reply-to-lead, notes (autosave), profile panel + activity timeline
+            ├── properties/page.js     ← listings: search, type + transaction filter, Add/Delete, multi-photo + video upload, media lightbox, availability status
+            ├── appointments/page.js   ← search, status filter, status dropdown per row, timezone-correct dates
+            └── analytics/page.js      ← the five-metric overview (temperature, conversion, handoffs, dead searches, most-rejected)
 ```
 
-Note: there is no `dashboardController.js` — never needed. Every dashboard read/write lives directly in the controller that owns that resource (`leadController.js`, `propertyController.js`, `appointmentController.js`).
+Note: there is no `dashboardController.js` for CRUD resources - every dashboard read/write for a single resource lives directly in the controller that owns it (`leadController.js`, `propertyController.js`, `appointmentController.js`). `analyticsController.js` is the one documented exception, because analytics genuinely spans four resources and belongs to none of them.
 
-No new frontend page files were added by any of the dashboard work above — every feature was added to an existing page.
+`analytics/page.js` is the one new frontend PAGE file added since the dashboard was first built - everything else in the conversational rearchitecture was added to an existing page.
 
 ---
 
