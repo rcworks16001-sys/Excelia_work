@@ -26,7 +26,7 @@ NOT in this build: owner self-listing portal, subscription/billing, Mobile Money
 
 ---
 
-## Current build status — read this first (last updated 2026-08-22)
+## Current build status — read this first (last updated 2026-08-23)
 
 **Repo:** https://github.com/rcworks16001-sys/Excelia_work, branch `main`, remote `origin`. Push only when explicitly asked — no standing auto-push rule.
 
@@ -46,6 +46,40 @@ NOT in this build: owner self-listing portal, subscription/billing, Mobile Money
 - **WhatsApp location sending** — `sendWhatsAppLocation()` built; `sendListingMedia()` (renamed from `sendListingPhotos`) now fans out photos → video (top listing only) → location pin per search result. Coordinates are still neighbourhood-level demo approximations, not exact addresses.
 - **Full chatbot conversational rebuild** — this was the largest piece of work and deserves its own section below ("Conversational bot architecture"). Short version: the bot used to be stateless per message (no memory, hardcoded reply templates, a booking flow that silently destroyed itself on any off-script message) and is now context-aware, composes genuinely conversational replies via Claude while never letting the model author a fact, and survives interruptions (questions, photo requests, greetings, language-switch requests) mid-booking without losing state.
 - **`npm run smoke-bot`** — a real regression suite (18 scenarios and counting) that drives the actual exported bot handlers against the DB with disposable leads. Exists because a static NLU test alone is not enough to catch a broken booking flow — see "Conversational bot architecture" for why this is mandatory to run after any bot change.
+
+### ✅ The conversational rearchitecture (7 phases, all done)
+
+Built against the client's 38-section blueprint (`Real_Estate_Chatbot_Flow_and_Logic.docx`). The bot
+went from **stateless per message** to an advisor that remembers, ranks, explains and escalates.
+Full detail is in "Conversational bot architecture" below — this is the index.
+
+| Phase | What it did |
+|---|---|
+| **0** | `processInboundMessage()` extracted from `handleMessage`; smoke-bot rewritten to drive the REAL router (it had been testing a fork of it); `pool.withTransaction` + atomic booking write |
+| **1** | `properties.transaction` (rent/sale) end to end, incl. dashboard |
+| **2** | `lead_profiles` + three-state merge + `nextBestAction()` + pending-state TTL |
+| **3** | Lead scoring, `lead_events`, forward-only status advance, `wants_human` escalation, dashboard notification bell |
+| **4** | `propertyMatcher.js` — soft matching with ✓/✗ reasons, replaced `ORDER BY price ASC`; rejection loop; comparison |
+| **5** | `knowledge.js` (Togo property Q&A), objection handling, escalation on repeated misunderstanding |
+| **6** | Lead profile panel + activity timeline, analytics page |
+
+**Test suite: 18 → 38 scenarios / 97 checks.** `npm run smoke-bot -- 30-34` runs a subset while
+iterating (~15 Claude calls); **the full run is the pre-commit gate** and prints "PARTIAL RUN" when
+filtered so a subset can never be mistaken for it.
+
+### Blueprint sections deliberately NOT built — don't "finish" these without asking
+- **§29 follow-up automation** — deferred by the client until after the demo. Blocked on a real Meta
+  constraint: outside a 24h window WhatsApp only permits pre-approved message templates, so this needs
+  templates registered in Business Manager first.
+- **§31 emotion detection** — replaced, not skipped. It only ever fed one branch (escalate a frustrated
+  lead), and three consecutive `NOT_UNDERSTOOD` events is a *fact* where "sounds frustrated" is a
+  guess. Same outcome, no inferred field, no extra call.
+- **§34/§35 multi-tenant SaaS** — out of scope; EXCELIA is single-client.
+- **§15 "nearby areas" as km distance** — coordinates are neighbourhood-level approximations, so a
+  printed "2.1 km" would be a precise-looking non-fact. Location matching is qualitative instead.
+- **§19 "know when to ask for the phone number"** — moot on WhatsApp; it arrives with message one.
+- **Email handoff (Resend)** — replaced at the client's request by the in-dashboard notification bell.
+  `resend` is still an unused dependency.
 
 ### ⏳ Actually pending
 - **Location coordinates are neighbourhood-level approximations, not exact addresses.** Replace with real coordinates when the client supplies them.
