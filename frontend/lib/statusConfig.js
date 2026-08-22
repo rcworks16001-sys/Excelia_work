@@ -32,6 +32,17 @@ export const APPOINTMENT_STATUS_CONFIG = {
 // dropdown. No --red token exists in globals.css; the rest of this codebase
 // uses the raw #b91c1c red directly for destructive/warning states (delete
 // buttons, error text), so "Rented" follows that same convention here.
+// Rent vs sale — mirrors the CHECK constraint on properties.transaction in
+// backend/src/db/migrate.js and VALID_TRANSACTIONS in propertyController.js.
+// Deliberately quieter styling than the availability badge next to it: this is
+// a category, not a state that needs attention.
+export const TRANSACTIONS = ['rent', 'sale'];
+
+export const TRANSACTION_CONFIG = {
+    rent: { label: { fr: 'À louer', en: 'For rent' }, bg: 'var(--mist)', color: 'var(--ash)' },
+    sale: { label: { fr: 'À vendre', en: 'For sale' }, bg: 'var(--ink)', color: '#fff' },
+};
+
 export const LISTING_STATUSES = ['available', 'reserved', 'rented'];
 
 export const LISTING_STATUS_CONFIG = {

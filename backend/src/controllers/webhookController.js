@@ -259,6 +259,10 @@ const NLUSchema = z.object({
     type: z.enum(PROPERTY_TYPES).nullable(),
     price_max: z.number().int().nullable(),
     bedrooms: z.number().int().nullable(),
+    // Renting vs buying. Null unless they actually signalled it — most
+    // enquiries here are rentals and guessing 'sale' from an ambiguous
+    // message would filter the catalogue down to two land plots.
+    transaction: z.enum(['rent', 'sale']).nullable(),
 });
 
 // Builds the NLU system prompt, optionally injecting the list of known
@@ -310,6 +314,7 @@ Field guidance:
   If the customer's wording implies a size but NOT a building type (e.g. just "something small", "2 bedrooms"), set bedrooms and leave type null rather than guessing a type.
 - price_max: the user's stated maximum budget as a plain integer number of XOF, with no currency symbol, spaces, or separators (e.g. "45000", "45 000 F CFA", "45k" -> 45000). Treat any stated budget as the maximum. null if no budget given.
 - bedrooms: integer number of bedrooms/chambres mentioned. null if not mentioned.
+- transaction: "rent" or "sale", ONLY when the customer actually signals which they want. "louer", "à louer", "rent", "renting", "monthly" -> "rent". "acheter", "à vendre", "buy", "purchase", "own" -> "sale". Land ("terrain", "parcelle") is normally bought, so a bare request for a terrain implies "sale". Otherwise null — most enquiries are rentals and an unfounded "sale" guess would wrongly rule out almost the whole catalogue.
 
 CRITICAL — CARRY FORWARD WHAT THEY ALREADY TOLD YOU:
 The customer builds their requirement up across several messages. For every filter field, if the NEW message does not mention it but an EARLIER message in the conversation did, repeat that earlier value. Only use null when neither the new message nor the conversation ever mentioned it.
@@ -331,7 +336,7 @@ const formatHistoryForPrompt = (history = []) =>
 const extractSearchFilters = async (text, history = []) => {
     const fallback = {
         intent: 'unclear', language_request: null, message_language: null,
-        city: null, neighbourhood: null, type: null, price_max: null, bedrooms: null,
+        city: null, neighbourhood: null, type: null, price_max: null, bedrooms: null, transaction: null,
     };
     if (!text || !text.trim()) return fallback;
 
@@ -888,6 +893,7 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                     type: filters.type,
                     price_max: filters.price_max,
                     bedrooms: filters.bedrooms,
+                    transaction: filters.transaction,
                 };
                 const { listings, relaxed } = await searchPropertiesWithFallback(searchFilters);
 

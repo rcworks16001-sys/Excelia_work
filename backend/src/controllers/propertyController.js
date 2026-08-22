@@ -6,7 +6,7 @@ const { translateToEnglish, translateToFrench } = require('../utils/translate');
 const PROPERTY_COLUMNS = `
     id, city, neighbourhood, type, price, bedrooms,
     description, description_en, photos, video_url, latitude, longitude, agency_contact,
-    listing_status, reserved_for
+    listing_status, reserved_for, transaction
 `;
 
 const PRICE_TOLERANCE = 1.1; // 10% tolerance on price_max, per CLAUDE.md search rules
@@ -18,6 +18,10 @@ const VALID_PROPERTY_TYPES = ['chambre_salon', 'appartement', 'villa', 'terrain'
 // The ONE list of valid listing statuses — matches the DB CHECK constraint on
 // properties.listing_status in migrate.js.
 const VALID_LISTING_STATUSES = ['available', 'reserved', 'rented'];
+
+// The ONE list of valid transaction types — matches the DB CHECK constraint on
+// properties.transaction in migrate.js.
+const VALID_TRANSACTIONS = ['rent', 'sale'];
 
 // Client decision: no per-agency contact numbers — every listing always
 // shows the single EXCELIA office number (same value migrate.js backfills
@@ -40,9 +44,14 @@ const EXCELIA_OFFICE_CONTACT = '+228 91062626 — EXCELIA office';
 // The ONE place a property search query is built. Every search path
 // (strict, relaxed, dashboard) goes through this — never hand-roll another.
 const buildQuery = (filters, limit) => {
-    const { city, neighbourhood, type, price_max, bedrooms } = filters;
+    const { city, neighbourhood, type, price_max, bedrooms, transaction } = filters;
     const conditions = [];
     const values = [];
+
+    if (transaction) {
+        values.push(transaction);
+        conditions.push(`transaction = $${values.length}`);
+    }
 
     if (city) {
         values.push(`%${city}%`);
@@ -111,19 +120,26 @@ const searchProperties = async (filters = {}) => {
 // Returns { listings, relaxed: ['neighbourhood', 'bedrooms', ...] }.
 // `relaxed` is empty when the strict search matched.
 const searchPropertiesWithFallback = async (filters = {}) => {
+    // `transaction` is dropped AFTER type on purpose. Only the two land plots
+    // are for sale, so someone asking to buy a villa has no strict match —
+    // dropping type first offers them what IS for sale (land) before falling
+    // back to offering rentals, which is the more useful order. Either way the
+    // widening is reported back and admitted in the reply rather than passed
+    // off as an exact match.
     const steps = [
         { drop: [] },
         { drop: ['neighbourhood'] },
         { drop: ['neighbourhood', 'bedrooms'] },
         { drop: ['neighbourhood', 'bedrooms', 'type'] },
-        { drop: ['neighbourhood', 'bedrooms', 'type', 'city'] },
-        { drop: ['neighbourhood', 'bedrooms', 'type', 'city', 'price_max'] },
+        { drop: ['neighbourhood', 'bedrooms', 'type', 'transaction'] },
+        { drop: ['neighbourhood', 'bedrooms', 'type', 'transaction', 'city'] },
+        { drop: ['neighbourhood', 'bedrooms', 'type', 'transaction', 'city', 'price_max'] },
     ];
 
     // A wide-open query ("anything cheap?") would otherwise return 10 full
     // listing cards — a wall of text in WhatsApp. Show a browsable handful
     // instead; the lead can narrow down from there.
-    const hasAnyFilter = ['city', 'neighbourhood', 'type', 'price_max', 'bedrooms']
+    const hasAnyFilter = ['city', 'neighbourhood', 'type', 'price_max', 'bedrooms', 'transaction']
         .some((f) => filters[f] !== undefined && filters[f] !== null);
     const strictLimit = hasAnyFilter ? 10 : 5;
 
@@ -338,7 +354,7 @@ const deleteVideo = async (req, res) => {
 // French column specifically — since it's shown by default and must never
 // be empty — falls back to the raw typed text rather than leaving it blank).
 const create = async (req, res) => {
-    const { city, neighbourhood, type, price, bedrooms, description, descriptionLang } = req.body || {};
+    const { city, neighbourhood, type, price, bedrooms, description, descriptionLang, transaction } = req.body || {};
 
     if (typeof city !== 'string' || !city.trim()) {
         return res.status(400).json({ error: 'city is required' });
@@ -348,6 +364,11 @@ const create = async (req, res) => {
     }
     if (!VALID_PROPERTY_TYPES.includes(type)) {
         return res.status(400).json({ error: `type must be one of: ${VALID_PROPERTY_TYPES.join(', ')}` });
+    }
+    // Optional — omitting it takes the DB default ('rent'), which is what the
+    // overwhelming majority of the catalogue is.
+    if (transaction !== undefined && transaction !== null && !VALID_TRANSACTIONS.includes(transaction)) {
+        return res.status(400).json({ error: `transaction must be one of: ${VALID_TRANSACTIONS.join(', ')}` });
     }
     const priceNum = Number(price);
     if (!Number.isFinite(priceNum) || priceNum <= 0 || !Number.isInteger(priceNum)) {
@@ -379,10 +400,11 @@ const create = async (req, res) => {
 
     try {
         const result = await pool.query(
-            `INSERT INTO properties (city, neighbourhood, type, price, bedrooms, description, description_en, photos, agency_contact)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', $8)
+            `INSERT INTO properties (city, neighbourhood, type, price, bedrooms, description, description_en, photos, agency_contact, transaction)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', $8, $9)
              RETURNING ${PROPERTY_COLUMNS}`,
-            [city.trim(), neighbourhood.trim(), type, priceNum, bedroomsNum, descriptionFr, descriptionEn, EXCELIA_OFFICE_CONTACT]
+            [city.trim(), neighbourhood.trim(), type, priceNum, bedroomsNum, descriptionFr, descriptionEn, EXCELIA_OFFICE_CONTACT,
+                transaction || 'rent']
         );
         res.status(201).json({ property: result.rows[0] });
     } catch (error) {
@@ -461,5 +483,6 @@ const updateListingStatus = async (req, res) => {
 module.exports = {
     searchProperties, searchPropertiesWithFallback, search, getPropertyById, list,
     uploadPhoto, deletePhoto, uploadVideo, deleteVideo, getKnownLocations,
-    create, remove, updateListingStatus, VALID_PROPERTY_TYPES, VALID_LISTING_STATUSES,
+    create, remove, updateListingStatus,
+    VALID_PROPERTY_TYPES, VALID_LISTING_STATUSES, VALID_TRANSACTIONS,
 };

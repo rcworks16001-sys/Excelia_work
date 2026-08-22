@@ -108,8 +108,8 @@ const seed = async () => {
         for (const listing of listings) {
             await pool.query(
                 `INSERT INTO properties
-                    (city, neighbourhood, type, price, bedrooms, description, photos, latitude, longitude, agency_contact)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+                    (city, neighbourhood, type, price, bedrooms, description, photos, latitude, longitude, agency_contact, transaction)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
                 [
                     listing.city,
                     listing.neighbourhood,
@@ -121,6 +121,10 @@ const seed = async () => {
                     listing.latitude,
                     listing.longitude,
                     EXCELIA_OFFICE_CONTACT,
+                    // Set here, not left to migrate.js's backfill: seeding runs
+                    // AFTER migration, so the backfill has already passed over
+                    // an empty table by the time these rows exist.
+                    listing.type === 'terrain' ? 'sale' : 'rent',
                 ]
             );
         }

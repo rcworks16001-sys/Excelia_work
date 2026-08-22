@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import api from '../../../lib/api';
 import { useDashboardLanguage } from '../../../lib/useDashboardLanguage';
 import { dashboardStrings } from '../../../lib/dashboardStrings';
-import { LISTING_STATUSES, LISTING_STATUS_CONFIG } from '../../../lib/statusConfig';
+import { LISTING_STATUSES, LISTING_STATUS_CONFIG, TRANSACTIONS, TRANSACTION_CONFIG } from '../../../lib/statusConfig';
 
 const formatXOF = (amount) => {
     const n = Math.round(Number(amount));
@@ -189,13 +189,22 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, on
                     <div style={{ fontSize: 14, fontWeight: 700 }}>
                         {t.typeLabels[property.type] || property.type}
                     </div>
-                    <span style={{
-                        fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 999, whiteSpace: 'nowrap',
-                        background: LISTING_STATUS_CONFIG[property.listing_status]?.bg || 'var(--mist)',
-                        color: LISTING_STATUS_CONFIG[property.listing_status]?.color || 'var(--ash)',
-                    }}>
-                        {LISTING_STATUS_CONFIG[property.listing_status]?.label[lang] || property.listing_status}
-                    </span>
+                    <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                        <span style={{
+                            fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 999, whiteSpace: 'nowrap',
+                            background: TRANSACTION_CONFIG[property.transaction]?.bg || 'var(--mist)',
+                            color: TRANSACTION_CONFIG[property.transaction]?.color || 'var(--ash)',
+                        }}>
+                            {TRANSACTION_CONFIG[property.transaction]?.label[lang] || property.transaction}
+                        </span>
+                        <span style={{
+                            fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 999, whiteSpace: 'nowrap',
+                            background: LISTING_STATUS_CONFIG[property.listing_status]?.bg || 'var(--mist)',
+                            color: LISTING_STATUS_CONFIG[property.listing_status]?.color || 'var(--ash)',
+                        }}>
+                            {LISTING_STATUS_CONFIG[property.listing_status]?.label[lang] || property.listing_status}
+                        </span>
+                    </div>
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--fog)', marginBottom: 10 }}>
                     {property.neighbourhood}, {property.city}
@@ -519,7 +528,7 @@ function Lightbox({ gallery, onClose }) {
     );
 }
 
-const ADD_FORM_DEFAULTS = { city: '', neighbourhood: '', type: '', price: '', bedrooms: '', description: '', descriptionLang: 'fr' };
+const ADD_FORM_DEFAULTS = { city: '', neighbourhood: '', type: '', price: '', bedrooms: '', description: '', descriptionLang: 'fr', transaction: 'rent' };
 
 export default function PropertiesPage() {
     const router = useRouter();
@@ -527,6 +536,7 @@ export default function PropertiesPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [typeFilter, setTypeFilter] = useState('all');
+    const [transactionFilter, setTransactionFilter] = useState('all');
     const [search, setSearch] = useState('');
     const [gallery, setGallery] = useState(null); // { items: [{type,url}], startIndex } | null
     const [showAddForm, setShowAddForm] = useState(false);
@@ -583,6 +593,7 @@ export default function PropertiesPage() {
                 bedrooms: addForm.bedrooms === '' ? null : Number(addForm.bedrooms),
                 description: addForm.description || null,
                 descriptionLang: addForm.descriptionLang,
+                transaction: addForm.transaction,
             });
             setProperties((prev) => [response.data.property, ...prev]);
             setAddForm(ADD_FORM_DEFAULTS);
@@ -601,6 +612,7 @@ export default function PropertiesPage() {
     const types = ['all', ...Object.keys(t.typeLabels)];
     const filtered = properties.filter((p) => {
         if (typeFilter !== 'all' && p.type !== typeFilter) return false;
+        if (transactionFilter !== 'all' && p.transaction !== transactionFilter) return false;
         if (!search) return true;
         // Match every word in the query against the combined fields, not the
         // whole query against one field — a copy-pasted "Neighbourhood, City"
@@ -660,6 +672,15 @@ export default function PropertiesPage() {
                         </select>
                     </div>
                     <div>
+                        <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--ash)', marginBottom: 4 }}>{t.addFieldTransaction}</label>
+                        <select value={addForm.transaction} onChange={(e) => setAddForm((f) => ({ ...f, transaction: e.target.value }))}
+                            style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)', outline: 'none', color: 'var(--ink)' }}>
+                            {TRANSACTIONS.map((tx) => (
+                                <option key={tx} value={tx}>{TRANSACTION_CONFIG[tx].label[lang]}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div>
                         <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--ash)', marginBottom: 4 }}>{t.addFieldPrice}</label>
                         <input required type="number" min="1" value={addForm.price} onChange={(e) => setAddForm((f) => ({ ...f, price: e.target.value }))}
                             style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid var(--ice)', borderRadius: 'var(--r-btn)', outline: 'none', color: 'var(--ink)' }} />
@@ -710,6 +731,22 @@ export default function PropertiesPage() {
                     </div>
                 </form>
             )}
+
+            <div style={{ display: 'flex', gap: 3, background: '#fff', border: '1px solid var(--ice)', borderRadius: 12, padding: 4, marginBottom: 10, flexWrap: 'wrap', width: 'fit-content' }}>
+                {['all', ...TRANSACTIONS].map((tx) => (
+                    <button
+                        key={tx}
+                        onClick={() => setTransactionFilter(tx)}
+                        style={{
+                            padding: '6px 13px', borderRadius: 9, border: 'none', fontSize: 12, fontWeight: 600,
+                            cursor: 'pointer', background: transactionFilter === tx ? 'var(--ink)' : 'transparent',
+                            color: transactionFilter === tx ? '#fff' : 'var(--ash)',
+                        }}
+                    >
+                        {tx === 'all' ? t.filterAllTransactions : TRANSACTION_CONFIG[tx].label[lang]}
+                    </button>
+                ))}
+            </div>
 
             <div style={{ display: 'flex', gap: 3, background: '#fff', border: '1px solid var(--ice)', borderRadius: 12, padding: 4, marginBottom: 20, flexWrap: 'wrap', width: 'fit-content' }}>
                 {types.map((type) => (

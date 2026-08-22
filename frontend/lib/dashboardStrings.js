@@ -128,6 +128,8 @@ export const dashboardStrings = {
             reservedForLabel: 'Réservé pour',
             reservedForPlaceholder: 'Nom ou description',
             statusUpdateError: 'Échec de la mise à jour du statut.',
+            addFieldTransaction: 'Transaction',
+            filterAllTransactions: 'Louer + Vendre',
         },
         appointments: {
             heading: 'Rendez-vous',
@@ -253,6 +255,8 @@ export const dashboardStrings = {
             reservedForLabel: 'Reserved for',
             reservedForPlaceholder: 'Name or description',
             statusUpdateError: 'Failed to update status.',
+            addFieldTransaction: 'Transaction',
+            filterAllTransactions: 'Rent + Sale',
         },
         appointments: {
             heading: 'Appointments',

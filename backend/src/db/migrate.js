@@ -58,6 +58,15 @@ const runMigrations = async () => {
         // matching how this codebase already handles similar cases).
         await pool.query(`ALTER TABLE properties ADD COLUMN IF NOT EXISTS reserved_for TEXT;`);
 
+        // Rent vs sale. The agency does both across all property types, so
+        // this is a real field rather than something derivable from `type` —
+        // but 'rent' is the safe default because it's the overwhelming
+        // majority of the catalogue, and a mislabelled sale listing merely
+        // shows up in the wrong search rather than breaking anything.
+        await pool.query(`ALTER TABLE properties ADD COLUMN IF NOT EXISTS transaction TEXT NOT NULL DEFAULT 'rent' CHECK (transaction IN (
+            'rent', 'sale'
+        ));`);
+
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_properties_city ON properties (city);`);
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_properties_neighbourhood ON properties (neighbourhood);`);
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_properties_type ON properties (type);`);
@@ -158,6 +167,19 @@ const runMigrations = async () => {
             `UPDATE properties SET agency_contact = $1 WHERE agency_contact IS DISTINCT FROM $1;`,
             ['+228 91062626 — EXCELIA office']
         );
+
+        // Land is sold, not rented. The `transaction` column defaults to
+        // 'rent', so without this the two terrain listings would advertise
+        // plots for monthly rent.
+        //
+        // Content-idempotent (`AND transaction <> 'sale'`) rather than
+        // run-once, deliberately: the documented order is migrate-then-seed,
+        // so on a fresh database this runs BEFORE any rows exist and does
+        // nothing. seed.js therefore sets `transaction` itself, and this
+        // backfill is what fixes already-live rows. Re-running is free, and
+        // an admin who deliberately re-labels a plot is not overridden on the
+        // next deploy — only rows still holding the wrong default are touched.
+        await pool.query(`UPDATE properties SET transaction = 'sale' WHERE type = 'terrain' AND transaction <> 'sale';`);
 
         console.log('Migrations complete.');
         process.exit(0);

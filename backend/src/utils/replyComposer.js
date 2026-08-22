@@ -52,6 +52,13 @@ const describeRelaxation = (relaxed, filters) => {
     if (relaxed.includes('neighbourhood') && filters.neighbourhood) parts.push(`the neighbourhood "${filters.neighbourhood}"`);
     if (relaxed.includes('bedrooms') && filters.bedrooms) parts.push(`exactly ${filters.bedrooms} bedroom(s)`);
     if (relaxed.includes('type') && filters.type) parts.push(`the property type they asked for`);
+    // Showing a buyer rental listings (or vice versa) is the widening most
+    // likely to waste their time — say it plainly, not as "the type".
+    if (relaxed.includes('transaction') && filters.transaction) {
+        parts.push(filters.transaction === 'sale'
+            ? 'being for sale (these are rentals)'
+            : 'being for rent (these are for sale)');
+    }
     if (relaxed.includes('city') && filters.city) parts.push(`the city "${filters.city}"`);
     if (relaxed.includes('price_max') && filters.price_max) parts.push(`their stated budget`);
     if (parts.length === 0) return '';
