@@ -1,13 +1,8 @@
 require('dotenv').config();
 const pool = require('../src/db/index');
 const wh = require('../src/controllers/webhookController');
-const {
-    getOrCreateLead, getLeadState, saveConversationMessage, getRecentConversation,
-    setPendingViewingSelection,
-} = require('../src/controllers/leadController');
-const { searchPropertiesWithFallback } = require('../src/controllers/propertyController');
-const { detectLanguageSwitchRequest, BOT_STRINGS, DEFAULT_LANGUAGE } = require('../src/utils/language');
-const rc = require('../src/utils/replyComposer');
+const { getLeadState } = require('../src/controllers/leadController');
+const { BOT_STRINGS } = require('../src/utils/language');
 
 // ── EXCELIA bot scenario suite ──
 // Run manually:  npm run smoke-bot
@@ -19,15 +14,16 @@ const rc = require('../src/utils/replyComposer');
 // on EVERY reply after a listing set, and leads just saw "Sorry, something
 // went wrong." Testing a reimplementation proves nothing about real code.
 //
-// So this drives the ACTUAL exported handlers. It catches undefined
-// variables, changed return shapes, and — most importantly — silently
-// destroyed booking state, which is invisible to `node -c` and to eyeballing
-// replies. Every scenario asserts the resulting pending state, not just text.
+// So this drives the ACTUAL production entry point — processInboundMessage(),
+// which is everything handleMessage does except the WhatsApp send. It catches
+// undefined variables, changed return shapes, routing drift, and — most
+// importantly — silently destroyed booking state, which is invisible to
+// `node -c` and to eyeballing replies. Every scenario asserts the resulting
+// pending state, not just text.
 //
 // No WhatsApp messages are sent. Each scenario uses its own disposable lead,
 // deleted before and after, so the DB is left exactly as found.
 
-const HISTORY_TURNS = 10;
 let failures = 0;
 
 const check = (label, ok, detail) => {
@@ -44,84 +40,40 @@ const cleanup = async (phone) => {
     await pool.query('DELETE FROM leads WHERE phone = $1', [phone]);
 };
 
-// Mirrors handleMessage's text path exactly, calling the REAL handlers.
+// Drives the REAL production router. processInboundMessage() is the whole bot
+// minus transport, so this exercises the exact code path a live WhatsApp
+// message takes — routing, language precedence, welcome prefix and all — and
+// sends nothing.
+//
+// This used to re-implement that routing inline. It passed while production
+// drifted away from it (a stale justBooked expression, greeting and
+// booking_intent collapsed into one branch, no welcome_prefix) — the same
+// class of bug described in the header above, one layer up. Never reintroduce
+// a copy of the router here: if something is hard to drive through
+// processInboundMessage, that is a signal to improve its seams, not to fork it.
 const send = async (phone, text) => {
     const before = await getLeadState(phone);
-    const history = before ? await getRecentConversation(before.id, HISTORY_TURNS) : [];
-    const inPending = Boolean(before && before.pendingAction);
-    let understanding = inPending ? null : await wh.extractSearchFilters(text, history);
+    const pendingBefore = before?.pendingAction || null;
 
-    const switchReq = detectLanguageSwitchRequest(text) || (understanding && understanding.language_request) || null;
-    const words = text.split(/\s+/).filter(Boolean).length;
-    let lang;
-    if (switchReq) lang = switchReq;
-    else if (before && (inPending || words <= 3)) lang = before.language;
-    else lang = (understanding && understanding.message_language) || (before && before.language) || DEFAULT_LANGUAGE;
+    const { replyText, mediaListings, lang } = await wh.processInboundMessage({
+        phone, text, contactName: 'Smoke Test', messageType: 'text',
+    });
 
-    const lead = await getOrCreateLead(phone, 'Smoke Test', lang);
-    await saveConversationMessage(lead.id, 'user', text);
-
-    let reply;
-    let media = null;
-    let route = '';
-
-    if (lead.pendingAction === 'awaiting_viewing_selection') {
-        const r = await wh.handleViewingSelectionReply({
-            leadId: lead.id, text, lang, pendingListingIds: lead.pendingListingIds, history,
-        });
-        route = 'selection';
-        if (r === null) {
-            route = 'selection->new_search';
-            understanding = await wh.extractSearchFilters(text, history);
-        } else {
-            reply = r.text;
-            media = r.mediaListings;
-        }
-    } else if (lead.pendingAction === 'awaiting_viewing_datetime') {
-        const r = await wh.handleViewingDateTimeReply({
-            leadId: lead.id, propertyId: lead.pendingPropertyId, text, lang, history,
-        });
-        route = 'datetime';
-        reply = r.text;
-        media = r.mediaListings;
-    }
-
-    if (reply === undefined) {
-        const f = understanding;
-        route = route ? `${route}->intent:${f.intent}` : `intent:${f.intent}`;
-        if (switchReq && f.intent !== 'search') {
-            reply = await rc.composeLanguageSwitch({ lang, history });
-        } else if (f.intent === 'closing') {
-            reply = await rc.composeClosing({ lang, userMessage: text, history, justBooked: history.length > 2 });
-        } else if (f.intent === 'off_topic') {
-            reply = await rc.composeOffTopic({ lang, userMessage: text, history });
-        } else if (f.intent === 'greeting' || f.intent === 'booking_intent') {
-            reply = await rc.composeGreeting({ lang, userMessage: text, isNewLead: lead.isNew, history });
-        } else {
-            const sf = {
-                city: f.city, neighbourhood: f.neighbourhood, type: f.type,
-                price_max: f.price_max, bedrooms: f.bedrooms,
-            };
-            const { listings, relaxed } = await searchPropertiesWithFallback(sf);
-            if (!listings.length) {
-                reply = await rc.composeNoResults({ lang, userMessage: text, history });
-            } else {
-                const intro = await rc.composeResultsIntro({
-                    lang, userMessage: text, listings, relaxed, filters: sf, history,
-                });
-                reply = `${intro}\n\n${wh.formatListingsBody(listings, lang)}\n\n${BOT_STRINGS.booking_prompt[lang]}`;
-                await setPendingViewingSelection(lead.id, listings.map((p) => p.id));
-                media = listings;
-            }
-        }
-    }
-
-    await saveConversationMessage(lead.id, 'bot', reply);
     const after = await getLeadState(phone);
+    // Routing is no longer decided here, so report the observable state
+    // transition instead of an internal branch name.
+    const route = `${pendingBefore || 'idle'} -> ${after.pendingAction || 'idle'}`;
     console.log(`\n      > ${text}`);
-    console.log(`        [${lang} | ${route} | pending=${after.pendingAction || 'none'}${media ? ` | media x${media.length}` : ''}]`);
-    console.log(`      < ${reply.split('\n')[0].slice(0, 130)}`);
-    return { reply, media, lang, route, pendingAction: after.pendingAction, leadId: lead.id };
+    console.log(`        [${lang} | ${route}${mediaListings ? ` | media x${mediaListings.length}` : ''}]`);
+    console.log(`      < ${replyText.split('\n')[0].slice(0, 130)}`);
+    return {
+        reply: replyText,
+        media: mediaListings,
+        lang,
+        route,
+        pendingAction: after.pendingAction,
+        leadId: after.id,
+    };
 };
 
 const apptCount = async (phone) => {
@@ -292,6 +244,38 @@ const run = async () => {
         check('2nd date-ask is not a verbatim repeat of the 1st', first !== second);
         check('3rd date-ask is not a verbatim repeat of either', third !== first && third !== second);
         check('flow still alive after two interruptions', c.pendingAction === 'awaiting_viewing_datetime');
+    });
+
+    // ── Scenarios 19-21: paths the old harness structurally could not reach ──
+    // It re-implemented the router, and its copy had no welcome_prefix, no
+    // isGreetingReply and no media branch — so these production behaviours
+    // were completely untested until processInboundMessage was extracted.
+
+    await scenario('NEW LEAD: first non-greeting message still gets the welcome prefix', async (p) => {
+        const r = await send(p, 'I want a villa');
+        check('welcomed on first contact', r.reply.includes(BOT_STRINGS.welcome_prefix.en), r.reply);
+        check('and still answered immediately', /F CFA/.test(r.reply));
+        const second = await send(p, 'what about an apartment');
+        check('not welcomed twice', !second.reply.includes(BOT_STRINGS.welcome_prefix.en), second.reply);
+    });
+
+    await scenario('NEW LEAD: a greeting is not double-welcomed', async (p) => {
+        const r = await send(p, 'Hello');
+        // composeGreeting already welcomes; prefixing would say it twice.
+        const occurrences = r.reply.split(BOT_STRINGS.welcome_prefix.en).length - 1;
+        check('welcome prefix not stacked onto a greeting', occurrences === 0, r.reply);
+    });
+
+    await scenario('Non-text message replies without destroying language or state', async (p) => {
+        await send(p, 'I am looking for a villa in Lome please');
+        const r = await wh.processInboundMessage({
+            phone: p, text: null, contactName: 'Smoke Test', messageType: 'image',
+        });
+        const after = await getLeadState(p);
+        check('replied to the image', typeof r.replyText === 'string' && r.replyText.length > 0);
+        check('did not flip an English lead to French', after.language === 'en', `language=${after.language}`);
+        check('did not destroy pending booking state',
+            after.pendingAction === 'awaiting_viewing_selection', `pending=${after.pendingAction}`);
     });
 
     console.log(`\n${'='.repeat(72)}`);

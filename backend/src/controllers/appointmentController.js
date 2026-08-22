@@ -7,6 +7,11 @@ const VALID_APPOINTMENT_STATUSES = ['pending', 'confirmed', 'cancelled', 'comple
 // ── createAppointment ──
 // The ONE place an appointment gets created. Used by the bot now; the
 // dashboard's booking calendar (Step 8) will read from this same table.
+//
+// `client` lets the caller run this inside an existing transaction (see
+// pool.withTransaction) — booking an appointment and clearing the lead's
+// pending state must both land or neither, or a crash between them leaves a
+// booked viewing with the lead still stuck being asked for a date.
 const createAppointment = async ({
     leadId,
     propertyId,
@@ -14,8 +19,9 @@ const createAppointment = async ({
     requestedDatetime,
     requestedDate = null,
     requestedTimeOfDay = null,
+    client = pool,
 }) => {
-    const result = await pool.query(
+    const result = await client.query(
         `INSERT INTO appointments
             (lead_id, property_id, requested_datetime_text, requested_datetime, requested_date, requested_time_of_day)
          VALUES ($1, $2, $3, $4, $5, $6)

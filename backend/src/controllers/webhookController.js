@@ -697,15 +697,22 @@ const handleViewingDateTimeReply = async ({ leadId, propertyId, text, lang, hist
         };
     }
 
-    await createAppointment({
-        leadId,
-        propertyId,
-        requestedText: text,
-        requestedDatetime: result.iso_datetime,
-        requestedDate: result.resolved_date,
-        requestedTimeOfDay: result.time_of_day,
+    // Both writes or neither: a crash between them used to leave a booked
+    // appointment with the lead still parked in 'awaiting_viewing_datetime',
+    // so their next message would be read as a date for a viewing they had
+    // already successfully booked.
+    await pool.withTransaction(async (client) => {
+        await createAppointment({
+            leadId,
+            propertyId,
+            requestedText: text,
+            requestedDatetime: result.iso_datetime,
+            requestedDate: result.resolved_date,
+            requestedTimeOfDay: result.time_of_day,
+            client,
+        });
+        await clearPendingAction(leadId, client);
     });
-    await clearPendingAction(leadId);
 
     // Wrapper is composed; the factual recap underneath stays deterministic.
     const confirmation = await composeBookingConfirmed({ lang, history });
@@ -715,57 +722,38 @@ ${propertyLabel}
 ${text}`, mediaListings: null };
 };
 
-// Sends the reply, saves it to the conversation log, and swallows its own
-// errors (best-effort logging must never mask the original failure).
-const replyAndLog = async (to, leadId, replyText) => {
-    if (leadId) {
-        try {
-            await saveConversationMessage(leadId, 'bot', replyText);
-        } catch (logError) {
-            console.error('Failed to save bot reply to conversations:', logError.message);
-        }
+// Saves a bot reply to the conversation log, swallowing its own errors
+// (best-effort logging must never mask the original failure or block a send).
+const logBotReply = async (leadId, replyText) => {
+    if (!leadId) return;
+    try {
+        await saveConversationMessage(leadId, 'bot', replyText);
+    } catch (logError) {
+        console.error('Failed to save bot reply to conversations:', logError.message);
     }
-    await sendWhatsAppMessage(to, replyText);
 };
 
-// ── Handle incoming message ──
-const handleMessage = async (req, res) => {
-    let to = null;
+// ── processInboundMessage ──
+// THE bot. Everything from "a lead said something" to "here is what to say
+// back" lives here: lead state, memory, language, NLU, booking flow, search,
+// composition — and it persists both sides of the exchange.
+//
+// It deliberately does NOT send anything. Transport (WhatsApp Graph API calls)
+// and the HTTP envelope belong to handleMessage below. That split exists so
+// scripts/smoke-bot.js can drive the REAL decision path end to end without
+// sending messages — before this split it had to re-implement the routing
+// below to test it, which meant the suite could stay green while production
+// diverged. See the header comment in smoke-bot.js for why that matters here.
+//
+// Never throws: on failure it returns the bilingual error fallback, so the
+// caller always has something to send.
+const processInboundMessage = async ({ phone, text: rawText, contactName = null, messageType = 'text' }) => {
     let lang = DEFAULT_LANGUAGE;
     let leadId = null;
 
     try {
-        const body = req.body || {};
-        const value = body.entry?.[0]?.changes?.[0]?.value;
-        const message = value?.messages?.[0];
-
-        // No user message in this payload (e.g. a status/delivery-receipt
-        // webhook) — nothing to do.
-        if (!message) {
-            return res.sendStatus(200);
-        }
-
-        const messageId = message.id;
-        to = message.from;
-        if (!messageId || !to) {
-            return res.sendStatus(200);
-        }
-
-        // Idempotency — Meta retries webhook delivery. Never process (or
-        // re-reply to) the same message twice.
-        const existing = await pool.query('SELECT id FROM processed_messages WHERE message_id = $1', [messageId]);
-        if (existing.rows.length > 0) {
-            return res.sendStatus(200);
-        }
-        await pool.query(
-            'INSERT INTO processed_messages (message_id) VALUES ($1) ON CONFLICT (message_id) DO NOTHING',
-            [messageId]
-        );
-
-        const contactName = value?.contacts?.[0]?.profile?.name || null;
-        const text = message.text?.body?.trim();
-
-        const existingLeadState = await getLeadState(to);
+        const text = rawText?.trim();
+        const existingLeadState = await getLeadState(phone);
 
         // The bot's short-term memory. Loaded BEFORE the lead row is touched
         // so the current message isn't in it yet — history is strictly "what
@@ -782,13 +770,13 @@ const handleMessage = async (req, res) => {
         // preserves it. Previously this defaulted to French and *wrote* that
         // default, which silently flipped an English conversation to French
         // for good the moment someone sent a photo.
-        if (message.type !== 'text' || !text) {
+        if (messageType !== 'text' || !text) {
             lang = existingLeadState?.language || DEFAULT_LANGUAGE;
-            ({ id: leadId } = await getOrCreateLead(to, contactName, null));
-            await saveConversationMessage(leadId, 'user', `[unsupported message type: ${message.type}]`);
-            const mediaReply = await composeUnsupportedMedia({ lang, mediaType: message.type });
-            await replyAndLog(to, leadId, mediaReply);
-            return res.sendStatus(200);
+            ({ id: leadId } = await getOrCreateLead(phone, contactName, null));
+            await saveConversationMessage(leadId, 'user', `[unsupported message type: ${messageType}]`);
+            const mediaReply = await composeUnsupportedMedia({ lang, mediaType: messageType });
+            await logBotReply(leadId, mediaReply);
+            return { replyText: mediaReply, mediaListings: null, lang, leadId };
         }
 
         // Free regex fast path for the unambiguous phrasings ("english",
@@ -817,7 +805,7 @@ const handleMessage = async (req, res) => {
             lang = understanding?.message_language || existingLeadState?.language || await detectLanguage(text);
         }
 
-        const lead = await getOrCreateLead(to, contactName, lang);
+        const lead = await getOrCreateLead(phone, contactName, lang);
         leadId = lead.id;
         await saveConversationMessage(leadId, 'user', text);
 
@@ -929,21 +917,75 @@ const handleMessage = async (req, res) => {
             ? `${BOT_STRINGS.welcome_prefix[lang]}\n\n${replyBody}`
             : replyBody;
 
-        await replyAndLog(to, leadId, replyText);
+        await logBotReply(leadId, replyText);
+        return { replyText, mediaListings: listingsShown, lang, leadId };
+    } catch (error) {
+        console.error('Error handling incoming message:', error);
+        const replyText = BOT_STRINGS.error_fallback[lang];
+        await logBotReply(leadId, replyText);
+        return { replyText, mediaListings: null, lang, leadId };
+    }
+};
+
+// ── Handle incoming message ──
+// The webhook envelope only: unwrap Meta's payload, enforce idempotency, hand
+// the actual message to processInboundMessage, then transmit whatever it
+// decided. No bot logic lives here — see processInboundMessage above.
+const handleMessage = async (req, res) => {
+    let to = null;
+
+    try {
+        const body = req.body || {};
+        const value = body.entry?.[0]?.changes?.[0]?.value;
+        const message = value?.messages?.[0];
+
+        // No user message in this payload (e.g. a status/delivery-receipt
+        // webhook) — nothing to do.
+        if (!message) {
+            return res.sendStatus(200);
+        }
+
+        const messageId = message.id;
+        to = message.from;
+        if (!messageId || !to) {
+            return res.sendStatus(200);
+        }
+
+        // Idempotency — Meta retries webhook delivery. Never process (or
+        // re-reply to) the same message twice.
+        const existing = await pool.query('SELECT id FROM processed_messages WHERE message_id = $1', [messageId]);
+        if (existing.rows.length > 0) {
+            return res.sendStatus(200);
+        }
+        await pool.query(
+            'INSERT INTO processed_messages (message_id) VALUES ($1) ON CONFLICT (message_id) DO NOTHING',
+            [messageId]
+        );
+
+        const { replyText, mediaListings, lang, leadId } = await processInboundMessage({
+            phone: to,
+            text: message.text?.body,
+            contactName: value?.contacts?.[0]?.profile?.name || null,
+            messageType: message.type,
+        });
+
+        await sendWhatsAppMessage(to, replyText);
 
         // Photos follow the text card as separate messages, per CLAUDE.md's
         // WhatsApp message-type rules — text first, then image calls, never
         // combined. Only for listings that actually have photos uploaded.
-        if (listingsShown) {
-            await sendListingMedia(to, leadId, listingsShown, lang);
+        if (mediaListings) {
+            await sendListingMedia(to, leadId, mediaListings, lang);
         }
 
         return res.sendStatus(200);
     } catch (error) {
+        // processInboundMessage never throws, so reaching here means the
+        // envelope, the idempotency write, or the send itself failed.
         console.error('Error handling incoming message:', error);
         if (to) {
             try {
-                await replyAndLog(to, leadId, BOT_STRINGS.error_fallback[lang]);
+                await sendWhatsAppMessage(to, BOT_STRINGS.error_fallback[DEFAULT_LANGUAGE]);
             } catch (sendError) {
                 console.error('Fallback send also failed:', sendError.message);
             }
@@ -961,6 +1003,7 @@ module.exports = {
     sendWhatsAppVideo,
     sendWhatsAppLocation,
     handleMessage,
+    processInboundMessage,
     handleViewingSelectionReply,
     handleViewingDateTimeReply,
     extractSearchFilters,

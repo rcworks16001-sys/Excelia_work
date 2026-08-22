@@ -118,8 +118,10 @@ const setPendingViewingDatetime = async (leadId, propertyId) => {
     );
 };
 
-const clearPendingAction = async (leadId) => {
-    await pool.query(
+// `client` lets this join a caller's transaction (see pool.withTransaction) —
+// clearing the flow after createAppointment must be atomic with it.
+const clearPendingAction = async (leadId, client = pool) => {
+    await client.query(
         'UPDATE leads SET pending_action = NULL, pending_property_id = NULL, pending_listing_ids = NULL WHERE id = $1',
         [leadId]
     );
