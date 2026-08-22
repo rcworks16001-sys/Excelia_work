@@ -12,6 +12,7 @@ const {
     composeGreeting,
     composeOffTopic,
     composeUnsupportedMedia,
+    composeLanguageSwitch,
 } = require('../utils/replyComposer');
 const {
     getOrCreateLead,
@@ -22,7 +23,9 @@ const {
     clearPendingAction,
 } = require('./leadController');
 const { createAppointment } = require('./appointmentController');
-const { detectLanguage, BOT_STRINGS, PROPERTY_TYPE_LABELS, DEFAULT_LANGUAGE } = require('../utils/language');
+const {
+    detectLanguage, detectLanguageSwitchRequest, BOT_STRINGS, PROPERTY_TYPE_LABELS, DEFAULT_LANGUAGE,
+} = require('../utils/language');
 const { formatXOF } = require('../utils/format');
 
 // Cloudinary config lives in utils/cloudinary.js now (shared with the bulk
@@ -532,13 +535,20 @@ const handleMessage = async (req, res) => {
             return res.sendStatus(200);
         }
 
+        // An explicit "reply in English please" beats everything below — it's
+        // often a SHORT message and can arrive mid-booking, which are exactly
+        // the two cases where we otherwise ignore the message's own language.
+        const languageSwitchRequest = detectLanguageSwitchRequest(text);
+
         // Short replies ("ok", "oui", "1", "yes please") and mid-booking-flow
         // slot-fills aren't reliable language signals — detection on two words
         // flips languages at random. Trust the lead's established language in
         // those cases and only re-detect on a substantial message.
         const wordCount = text.split(/\s+/).filter(Boolean).length;
         const hasReliableLanguageSignal = wordCount > 3;
-        if (existingLeadState && (existingLeadState.pendingAction || !hasReliableLanguageSignal)) {
+        if (languageSwitchRequest) {
+            lang = languageSwitchRequest;
+        } else if (existingLeadState && (existingLeadState.pendingAction || !hasReliableLanguageSignal)) {
             lang = existingLeadState.language;
         } else {
             lang = await detectLanguage(text);
@@ -568,7 +578,16 @@ const handleMessage = async (req, res) => {
         } else {
             const filters = await extractSearchFilters(text);
 
-            if (filters.intent === 'off_topic') {
+            if (languageSwitchRequest && filters.intent !== 'search') {
+                // They only asked to change language — confirm in the NEW
+                // language and invite a requirement, rather than treating
+                // "in English please" as an off-topic message or dumping
+                // listings at them. A switch bundled WITH a request
+                // ("show me villas in english") falls through to the search
+                // below, which now renders in the new language anyway.
+                replyBody = await composeLanguageSwitch({ lang });
+                isGreetingReply = true;
+            } else if (filters.intent === 'off_topic') {
                 replyBody = await composeOffTopic({ lang, userMessage: text });
             } else if (filters.intent === 'greeting') {
                 // A pure greeting with no property information — welcome them

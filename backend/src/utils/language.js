@@ -33,6 +33,36 @@ const detectLanguage = async (text) => {
     }
 };
 
+// ── detectLanguageSwitchRequest(text) ──
+// Did the lead explicitly ASK to be spoken to in another language?
+//
+// Deliberately regex, not an LLM call: these requests are highly formulaic,
+// and this has to work on messages as short as "english" — which are exactly
+// the ones detectLanguage() is (correctly) not trusted with. Zero latency,
+// zero cost, deterministic, and it runs on every message including mid-booking.
+//
+// Returns 'fr' | 'en' | null.
+const LANGUAGE_SWITCH_PATTERNS = [
+    // "in english", "en anglais", "english please", "speak/reply/write in english"
+    { lang: 'en', re: /\b(?:in|en)\s+(?:english|anglais)\b/i },
+    { lang: 'en', re: /\b(?:english|anglais)\s*(?:please|pls|svp|s'?il\s+vous\s+pla[iî]t)\b/i },
+    { lang: 'en', re: /\b(?:speak|spoke|parle[rz]?|r[ée]pon(?:ds?|dre|dez)|reply|answer|write|[ée]cri(?:s|re|vez)|switch|change|continue)\b[^.?!]{0,25}\b(?:english|anglais)\b/i },
+    { lang: 'en', re: /^\s*(?:english|anglais)\s*[!.?]*\s*$/i },
+
+    { lang: 'fr', re: /\b(?:in|en)\s+(?:french|fran[cç]ais)\b/i },
+    { lang: 'fr', re: /\b(?:french|fran[cç]ais)\s*(?:please|pls|svp|s'?il\s+vous\s+pla[iî]t)\b/i },
+    { lang: 'fr', re: /\b(?:speak|spoke|parle[rz]?|r[ée]pon(?:ds?|dre|dez)|reply|answer|write|[ée]cri(?:s|re|vez)|switch|change|continue)\b[^.?!]{0,25}\b(?:french|fran[cç]ais)\b/i },
+    { lang: 'fr', re: /^\s*(?:french|fran[cç]ais)\s*[!.?]*\s*$/i },
+];
+
+const detectLanguageSwitchRequest = (text) => {
+    if (!text || !text.trim()) return null;
+    for (const { lang, re } of LANGUAGE_SWITCH_PATTERNS) {
+        if (re.test(text)) return lang;
+    }
+    return null;
+};
+
 // ── BOT_STRINGS ──
 // Hardcoded bilingual bot strings. One object, two keys (fr/en) per message.
 // Never ask Claude to translate these.
@@ -88,6 +118,10 @@ const BOT_STRINGS = {
         fr: "C'est noté ! Votre demande de visite a été enregistrée pour :",
         en: "Got it! Your viewing request has been saved for:",
     },
+    language_switched: {
+        fr: "Bien sûr, je continue en français. Que recherchez-vous ?",
+        en: "Of course, I'll continue in English. What are you looking for?",
+    },
 };
 
 // Bilingual display labels for the property `type` enum — used when
@@ -103,6 +137,7 @@ const PROPERTY_TYPE_LABELS = {
 
 module.exports = {
     detectLanguage,
+    detectLanguageSwitchRequest,
     BOT_STRINGS,
     PROPERTY_TYPE_LABELS,
     DEFAULT_LANGUAGE,

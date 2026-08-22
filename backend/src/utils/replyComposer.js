@@ -161,10 +161,26 @@ Your task: the customer sent a ${mediaType} that you cannot read. Briefly say yo
     return callComposer(system, user, BOT_STRINGS.unsupported_message_type[lang]);
 };
 
+// ── composeLanguageSwitch ──
+// They asked to be spoken to in another language and said nothing else.
+// `lang` here is already the NEW language.
+const composeLanguageSwitch = async ({ lang }) => {
+    const system = `${BASE_PERSONA}
+
+Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
+
+Your task: the customer just asked you to switch to this language. Briefly and warmly confirm you're switching, then ask what they're looking for. One short sentence, two at most. Do not apologise.`;
+
+    const user = 'Write the confirmation.';
+
+    return callComposer(system, user, BOT_STRINGS.language_switched[lang]);
+};
+
 module.exports = {
     composeResultsIntro,
     composeNoResults,
     composeGreeting,
     composeOffTopic,
     composeUnsupportedMedia,
+    composeLanguageSwitch,
 };
