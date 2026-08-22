@@ -18,4 +18,8 @@ router.post('/:id/reply', authenticateAdmin, leadController.sendReply);
 // PATCH /api/leads/:id/notes — update admin notes, body: { notes }
 router.patch('/:id/notes', authenticateAdmin, leadController.updateNotes);
 
+// POST /api/leads/:id/summary — generate a one-off conversation summary for
+// the admin, body: { lang }. Not persisted — see utils/summarizer.js.
+router.post('/:id/summary', authenticateAdmin, leadController.summarizeLeadConversation);
+
 module.exports = router;

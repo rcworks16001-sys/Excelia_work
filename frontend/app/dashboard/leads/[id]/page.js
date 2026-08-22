@@ -104,6 +104,9 @@ export default function LeadDetailPage() {
     const [sendError, setSendError] = useState('');
     const [notesDraft, setNotesDraft] = useState('');
     const [notesStatus, setNotesStatus] = useState('idle'); // idle | saving | saved | error
+    const [summary, setSummary] = useState(null);
+    const [summarizing, setSummarizing] = useState(false);
+    const [summaryError, setSummaryError] = useState('');
     const [lang] = useDashboardLanguage();
     const t = dashboardStrings[lang].leadDetail;
     const notesTimerRef = useRef(null);
@@ -111,6 +114,10 @@ export default function LeadDetailPage() {
 
     useEffect(() => {
         notesLoadedRef.current = false;
+        // A summary is per-lead and never persisted (see handleSummarize) —
+        // switching leads must not show the previous lead's summary.
+        setSummary(null);
+        setSummaryError('');
         fetchLead();
         return () => {
             if (notesTimerRef.current) clearTimeout(notesTimerRef.current);
@@ -172,6 +179,28 @@ export default function LeadDetailPage() {
             setSendError(t.sendError);
         } finally {
             setSending(false);
+        }
+    };
+
+    // Not persisted server-side (see backend/src/utils/summarizer.js) — a
+    // fresh Claude call every click, in the ADMIN's dashboard language (not
+    // necessarily the lead's own language), since this is for the admin's
+    // eyes only.
+    const handleSummarize = async () => {
+        if (summarizing) return;
+        setSummarizing(true);
+        setSummaryError('');
+        try {
+            const response = await api.post(`/leads/${params.id}/summary`, { lang });
+            setSummary(response.data.summary);
+        } catch (err) {
+            if (err.response?.status === 401) {
+                router.push('/login');
+                return;
+            }
+            setSummaryError(t.summaryError);
+        } finally {
+            setSummarizing(false);
         }
     };
 
@@ -284,9 +313,33 @@ export default function LeadDetailPage() {
             <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: 24 }}>
                 {/* Conversation */}
                 <div>
-                    <div style={{ fontSize: 11, fontWeight: 800, color: 'var(--fog)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
-                        {t.conversation}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                        <div style={{ fontSize: 11, fontWeight: 800, color: 'var(--fog)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                            {t.conversation}
+                        </div>
+                        <button
+                            onClick={handleSummarize}
+                            disabled={summarizing || conversations.length === 0}
+                            style={{
+                                padding: '5px 12px', fontSize: 11, fontWeight: 700,
+                                background: '#fff', color: 'var(--ink)', border: '1px solid var(--ice)',
+                                borderRadius: 'var(--r-btn)',
+                                cursor: summarizing || conversations.length === 0 ? 'default' : 'pointer',
+                                opacity: summarizing || conversations.length === 0 ? 0.5 : 1,
+                            }}
+                        >
+                            {summarizing ? t.summarizing : `✨ ${t.summarize}`}
+                        </button>
                     </div>
+                    {summaryError && <div style={{ fontSize: 12, color: '#b91c1c', marginBottom: 8 }}>{summaryError}</div>}
+                    {summary && (
+                        <div style={{
+                            background: 'var(--mist)', border: '1px solid var(--ice)', borderRadius: 'var(--r-card)',
+                            padding: 14, marginBottom: 12, fontSize: 13, lineHeight: 1.5, color: 'var(--ink)',
+                        }}>
+                            {summary}
+                        </div>
+                    )}
                     <div style={{
                         background: '#fff', border: '1px solid var(--ice)', borderRadius: 'var(--r-card)',
                         padding: 20, display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 600, overflowY: 'auto',

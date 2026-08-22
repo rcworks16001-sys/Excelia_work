@@ -80,6 +80,18 @@ filtered so a subset can never be mistaken for it.
   `updateLeadNameIfMissing()` (COALESCE — fills a blank only, never overwrites). Scenarios 41-42 in
   `smoke-bot.js`.
 
+**Also done and pushed, post-Phase-6 (2026-08-23): on-demand conversation summary.** Lead Detail
+gained a "Summarize" button above the conversation thread (`POST /api/leads/:id/summary`, body
+`{ lang }`). Generates a 3-5 sentence admin-facing summary (what the lead wants, facts established,
+what's outstanding, friction) via `utils/summarizer.js` (`summarizeConversation`, its own Claude
+Haiku call, same never-throws-null-on-failure contract as `translate.js`). Deliberately **not
+persisted** — no new column, no staleness to manage, one Claude call per click, same tradeoff already
+accepted for reply-to-lead. Capped to the last `SUMMARY_MESSAGE_LIMIT` (100) messages so a very long
+conversation can't turn one click into a runaway-cost call. Uses the **dashboard's** FR/EN toggle
+language, not the lead's stored language — this is the one deliberate exception to "the dashboard
+toggle never touches conversation content" (see "Language handling" below), because the output here
+is for the admin's eyes only, never sent to the lead.
+
 ### Blueprint sections deliberately NOT built — don't "finish" these without asking
 - **§29 follow-up automation** — deferred by the client until after the demo. Blocked on a real Meta
   constraint: outside a 24h window WhatsApp only permits pre-approved message templates, so this needs
@@ -606,7 +618,7 @@ excelia/
 │       ├── controllers/
 │       │   ├── webhookController.js   ← WhatsApp inbound + ALL bot logic: NLU (extractSearchFilters/extractViewingSelection/extractAppointmentDateTime), the NBA branch dispatch, booking-flow handlers, sendWhatsAppMessage/Image/Video/Location, sendListingMedia. processInboundMessage() is the whole bot minus transport - handleMessage is envelope + idempotency + send only.
 │       │   ├── propertyController.js  ← searchProperties() (dashboard, via buildQuery()) / rankPropertiesForLead() (bot, via utils/propertyMatcher.js), getKnownLocations(), create/remove, photo+video upload/delete, listing status
-│       │   ├── leadController.js      ← lead CRUD, getRecentConversation() (bot memory), booking pending-flow state + TTL, updateLeadNameIfMissing(), forward-only status pipeline (advanceLeadStatus), updateNotes, sendReply
+│       │   ├── leadController.js      ← lead CRUD, getRecentConversation() (bot memory), booking pending-flow state + TTL, updateLeadNameIfMissing(), forward-only status pipeline (advanceLeadStatus), updateNotes, sendReply, summarizeLeadConversation (not persisted)
 │       │   ├── leadProfileController.js ← owns lead_profiles: mergeProfile() (three-state merge), flagForHuman(), refreshLeadSignals() (scoring + status advance each turn), profileToSearchFilters()
 │       │   ├── leadEventController.js ← owns lead_events: recordEvent(), getEventsForLead(), countTrailingEvents() (repeated-misunderstanding escalation)
 │       │   ├── notificationController.js ← owns notifications: createNotification() (deduped), list/markRead/markAllRead for the dashboard bell
@@ -616,7 +628,7 @@ excelia/
 │       ├── routes/
 │       │   ├── webhook.js
 │       │   ├── properties.js          ← includes create/delete, photo upload/delete, video upload/delete endpoints
-│       │   ├── leads.js               ← includes status PATCH, notes PATCH, reply POST
+│       │   ├── leads.js               ← includes status PATCH, notes PATCH, reply POST, summary POST
 │       │   ├── appointments.js        ← includes status PATCH
 │       │   ├── auth.js
 │       │   ├── notifications.js       ← list, read-all PATCH, per-id read PATCH
@@ -630,7 +642,8 @@ excelia/
 │           ├── nextBestAction.js      ← the decision engine: pure, synchronous, ordered rule list - see "Decisions are made in code, not in a prompt"
 │           ├── propertyMatcher.js     ← soft matching + scoring + match reasons for the bot's search - see "Property matching is scored, not filtered"
 │           ├── knowledge.js           ← curated Togo property-market Q&A (cour commune, titre foncier, etc.) - see "The knowledge layer"
-│           └── leadScoring.js         ← pure, explainable lead scoring (hot/warm/qualified/cold) - see "Scoring, escalation and notifications"
+│           ├── leadScoring.js         ← pure, explainable lead scoring (hot/warm/qualified/cold) - see "Scoring, escalation and notifications"
+│           └── summarizer.js          ← summarizeConversation() — on-demand admin-facing chat summary, not persisted, own Claude call
 │
 └── frontend/
     ├── .env.local

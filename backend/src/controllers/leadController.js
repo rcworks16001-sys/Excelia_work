@@ -1,5 +1,12 @@
 const pool = require('../db/index');
 const { getEventsForLead } = require('./leadEventController');
+const { summarizeConversation } = require('../utils/summarizer');
+
+// Capped so a very long-running lead doesn't turn one button click into a
+// huge/expensive Claude call — mirrors getRecentConversation's cost-control
+// reasoning below, just with a larger window since a summary needs more
+// context than a single reply does.
+const SUMMARY_MESSAGE_LIMIT = 100;
 
 // A booking conversation that has gone cold is worse than no booking
 // conversation: without an expiry, a lead who stops replying while being asked
@@ -430,6 +437,47 @@ const sendReply = async (req, res) => {
     }
 };
 
+// ── summarizeLeadConversation(req, res) ──
+// On-demand only — nothing here is persisted (see utils/summarizer.js). A
+// button click costs one Claude call; there is no schema addition and nothing
+// to keep in sync when the conversation moves on.
+const summarizeLeadConversation = async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+        return res.status(400).json({ error: 'Invalid lead id' });
+    }
+    const lang = req.body?.lang === 'en' ? 'en' : 'fr';
+
+    try {
+        const leadResult = await pool.query('SELECT id FROM leads WHERE id = $1', [id]);
+        if (leadResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Lead not found' });
+        }
+
+        const conversation = await pool.query(
+            `SELECT sender, message FROM (
+                SELECT sender, message, created_at FROM conversations
+                 WHERE lead_id = $1 ORDER BY created_at DESC LIMIT $2
+             ) recent ORDER BY created_at ASC`,
+            [id, SUMMARY_MESSAGE_LIMIT]
+        );
+
+        if (conversation.rows.length === 0) {
+            return res.json({ summary: null });
+        }
+
+        const summary = await summarizeConversation(conversation.rows, lang);
+        if (!summary) {
+            return res.status(502).json({ error: 'Failed to generate summary' });
+        }
+
+        res.json({ summary });
+    } catch (error) {
+        console.error('Error summarizing lead conversation:', error);
+        res.status(500).json({ error: 'Failed to generate summary' });
+    }
+};
+
 module.exports = {
     getOrCreateLead,
     getLeadState,
@@ -444,6 +492,7 @@ module.exports = {
     updateStatus,
     updateNotes,
     sendReply,
+    summarizeLeadConversation,
     advanceLeadStatus,
     VALID_STATUSES,
     STATUS_LADDER,
