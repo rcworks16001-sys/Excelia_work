@@ -114,6 +114,12 @@ const BOT_STRINGS = {
         fr: "Parfait ! Quelle date et heure vous conviendraient pour la visite ?",
         en: "Great! What date and time would work for the viewing?",
     },
+    // First ask only, and only when no name is on file yet — see needsName in
+    // composeAskDatetime.
+    ask_datetime_and_name: {
+        fr: "Parfait ! Quel est votre nom, et quelle date et heure vous conviendraient pour la visite ?",
+        en: "Great! What's your name, and what date and time would work for the viewing?",
+    },
     booking_confirmed: {
         fr: "C'est noté ! Votre demande de visite a été enregistrée pour :",
         en: "Got it! Your viewing request has been saved for:",

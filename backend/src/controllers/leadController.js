@@ -26,7 +26,7 @@ const getOrCreateLead = async (phone, name, language) => {
     // getLeadState — if only one of them expired stale state, the bot would
     // run a fresh search AND still route the reply into the booking handler.
     const existing = await pool.query(
-        `SELECT id, pending_action, pending_property_id, pending_listing_ids,
+        `SELECT id, name, pending_action, pending_property_id, pending_listing_ids,
                 (pending_set_at IS NOT NULL AND pending_set_at < now() - ($2 || ' hours')::interval) AS pending_expired
            FROM leads WHERE phone = $1`,
         [phone, String(PENDING_STATE_TTL_HOURS)]
@@ -46,6 +46,12 @@ const getOrCreateLead = async (phone, name, language) => {
         return {
             id: row.id,
             isNew: false,
+            // The name AFTER the COALESCE write above — whatever was already
+            // stored wins, else the value we were just given. Callers (the
+            // booking flow) use this to decide whether to ask for a name at
+            // all, so it must reflect the row as it now stands, not as it was
+            // before this call.
+            name: row.name || name || null,
             pendingAction: expired ? null : row.pending_action,
             pendingPropertyId: expired ? null : row.pending_property_id,
             pendingListingIds: expired ? [] : (row.pending_listing_ids || []),
@@ -61,6 +67,7 @@ const getOrCreateLead = async (phone, name, language) => {
     return {
         id: inserted.rows[0].id,
         isNew: true,
+        name: name || null,
         pendingAction: null,
         pendingPropertyId: null,
         pendingListingIds: [],
@@ -177,6 +184,19 @@ const advanceLeadStatus = async (leadId, target, client = pool) => {
 
     await client.query('UPDATE leads SET status = $1 WHERE id = $2', [target, leadId]);
     return target;
+};
+
+// ── updateLeadNameIfMissing(leadId, name) ──
+// The ONE place a lead's name is written from something they SAID, as opposed
+// to WhatsApp's own profile name (handled by getOrCreateLead). Two callers:
+// the booking flow, which asks directly once nothing else has supplied a name,
+// and the main NLU, which captures it if a lead volunteers it unprompted
+// ("Hi, I'm Kofi..."). COALESCE means it can never overwrite a name already on
+// file — WhatsApp's profile name and an earlier self-introduction both win
+// over a later guess.
+const updateLeadNameIfMissing = async (leadId, name, client = pool) => {
+    if (!name) return;
+    await client.query('UPDATE leads SET name = COALESCE(name, $1) WHERE id = $2', [name, leadId]);
 };
 
 // `client` lets this join a caller's transaction (see pool.withTransaction) —
@@ -418,6 +438,7 @@ module.exports = {
     setPendingViewingSelection,
     setPendingViewingDatetime,
     clearPendingAction,
+    updateLeadNameIfMissing,
     list,
     getById,
     updateStatus,

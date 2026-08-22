@@ -45,6 +45,7 @@ const {
     setPendingViewingSelection,
     setPendingViewingDatetime,
     clearPendingAction,
+    updateLeadNameIfMissing,
 } = require('./leadController');
 const { createAppointment } = require('./appointmentController');
 const {
@@ -316,6 +317,11 @@ const NLUSchema = z.object({
         'bedrooms_min', 'bedrooms_max', 'budget_max', 'budget_stretch_max',
         'purpose', 'timeline',
     ])),
+    // Passive capture: if a lead volunteers their name unprompted ("Hi, I'm
+    // Kofi, looking for..."), take it — separate from the explicit ask in the
+    // booking flow (composeAskDatetime), which is the primary way a name gets
+    // collected. null unless they actually stated it themselves.
+    stated_name: z.string().nullable(),
 });
 
 // Builds the NLU system prompt, optionally injecting the list of known
@@ -404,6 +410,7 @@ Field guidance:
 - timeline: "immediate", "within_1_month", "within_3_months", "later", or "exploring" (just browsing, no timeframe). null unless they indicate one.
 - handoff_reason: only when intent is "wants_human" — "asked_for_agent", "negotiation", "complaint", or "legal_or_financial". null otherwise.
 - cleared_fields: list any field the customer has EXPLICITLY told you to drop or stop applying — "forget the budget", "anywhere is fine now", "actually never mind the area", "peu importe le quartier". This is ONLY for a deliberate retraction. Simply not mentioning a field in this message is NOT a retraction — leave it out of this list and set that field to null. Almost always an empty array.
+- stated_name: their own name, ONLY if they give it themselves ("I'm Kofi", "my name is Ama", "c'est Koffi"). Never guess it from a WhatsApp display name or anywhere else. null in the overwhelming majority of messages — most people never mention their name unprompted.
 
 ${profileBlock}
 
@@ -427,7 +434,7 @@ const extractSearchFilters = async (text, history = [], profile = null) => {
         intent: 'unclear', language_request: null, message_language: null,
         city: null, neighbourhood: null, type: null, price_max: null, bedrooms: null, transaction: null,
         budget_stretch_max: null, bedrooms_min: null, bedrooms_max: null,
-        purpose: null, timeline: null, handoff_reason: null, cleared_fields: [],
+        purpose: null, timeline: null, handoff_reason: null, cleared_fields: [], stated_name: null,
     };
     if (!text || !text.trim()) return fallback;
 
@@ -570,13 +577,17 @@ const AppointmentDateTimeSchema = z.object({
     iso_datetime: z.string().nullable(),
     resolved_date: z.string().nullable(),
     time_of_day: z.enum(['morning', 'afternoon', 'evening']).nullable(),
+    // Set when composeAskDatetime asked for a name alongside the date (see
+    // needsName) and they gave one, e.g. "Kofi, tomorrow 11am" or a bare
+    // "Ama". Also catches it if they volunteer it without being asked.
+    stated_name: z.string().nullable(),
 });
 
 // `now` is injectable so the backfill script can re-resolve an OLD booking
 // using the date it was actually made — "demain" means nothing without the
 // reference point it was said relative to.
 const extractAppointmentDateTime = async (text, referenceNow = null, history = []) => {
-    const fallback = { decision: 'unclear', selected_number: null, iso_datetime: null, resolved_date: null, time_of_day: null, handoff_reason: null };
+    const fallback = { decision: 'unclear', selected_number: null, iso_datetime: null, resolved_date: null, time_of_day: null, handoff_reason: null, stated_name: null };
     if (!text || !text.trim()) return fallback;
 
     try {
@@ -598,7 +609,8 @@ const extractAppointmentDateTime = async (text, referenceNow = null, history = [
 - selected_number: if they refer to a specific listing by number, that number; otherwise null.
 - iso_datetime: resolve their reply to an absolute ISO 8601 datetime (assume Togo's timezone, UTC+0) ONLY if you can confidently determine both a date AND a specific clock time. If the time is vague ("matin", "morning", "dans la journée"), return null here — use resolved_date + time_of_day instead. Never invent a clock time.
 - resolved_date: the calendar date they mean, as "YYYY-MM-DD" (Togo time, UTC+0), whenever the DATE is determinable — including relative expressions ("demain" -> the day after the current date above, "vendredi" -> the next upcoming Friday). Fill this in even when you also filled iso_datetime, and even when the time of day is unknown. null only if no date can be determined at all.
-- time_of_day: "morning", "afternoon", or "evening" if they indicated a coarse part of the day ("matin", "après-midi", "le soir"). If they gave a specific clock time instead, still classify it (e.g. 15h -> "afternoon"). null if there is no time indication whatsoever.`,
+- time_of_day: "morning", "afternoon", or "evening" if they indicated a coarse part of the day ("matin", "après-midi", "le soir"). If they gave a specific clock time instead, still classify it (e.g. 15h -> "afternoon"). null if there is no time indication whatsoever.
+- stated_name: their own name, if this reply gives one — either because you just asked for it ("Kofi, tomorrow 11am", or a bare "Ama" alongside a date) or because they volunteer it. null if no name is present in this reply.`,
             messages: [{ role: 'user', content: `${history.length ? `RECENT CONVERSATION (oldest first):
 ${formatHistoryForPrompt(history)}
 
@@ -715,7 +727,7 @@ const formatListingsSummary = (listings, lang) =>
 // connection). mediaListings is null unless media was requested.
 // handleViewingDateTimeReply still returns a plain string; nothing in the
 // date/time step can request media.
-const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingIds, history = [] }) => {
+const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingIds, history = [], leadName = null }) => {
     if (!pendingListingIds || pendingListingIds.length === 0) {
         // Defensive — shouldn't happen, but never get the lead stuck.
         await clearPendingAction(leadId);
@@ -964,7 +976,7 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
         const propertyLabel = property
             ? `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`
             : '';
-        return { text: await composeAskDatetime({ lang, propertyLabel, history }), mediaListings: null };
+        return { text: await composeAskDatetime({ lang, propertyLabel, history, needsName: !leadName }), mediaListings: null };
     }
 
     // They clearly want to book but didn't say which one — that's a normal
@@ -979,7 +991,7 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
             const propertyLabel = property
                 ? `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`
                 : '';
-            return { text: await composeAskDatetime({ lang, propertyLabel, history }), mediaListings: null };
+            return { text: await composeAskDatetime({ lang, propertyLabel, history, needsName: !leadName }), mediaListings: null };
         }
         return { text: await composeBookingPrompt({ lang, listingCount: pendingListingIds.length, history }), mediaListings: null };
     }
@@ -1039,6 +1051,10 @@ const looksLikeDateText = (text) => /\d|today|tomorrow|tonight|morning|afternoon
 
 const handleViewingDateTimeReply = async ({ leadId, propertyId, text, lang, history }) => {
     const result = await extractAppointmentDateTime(text, null, history);
+    // If we just asked for it (or they gave it unprompted), save it. COALESCE
+    // inside means this can only ever fill a blank, never overwrite a name
+    // already on file.
+    await updateLeadNameIfMissing(leadId, result.stated_name);
     const property = await getPropertyById(propertyId);
     const propertyLabel = property
         ? `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`
@@ -1242,6 +1258,7 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                 lang,
                 pendingListingIds: lead.pendingListingIds,
                 history,
+                leadName: lead.name,
             });
             // null = "this wasn't a selection, they're searching again".
             // Load the understanding we skipped and fall through to search.
@@ -1270,6 +1287,11 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
             if (dateResult.mediaListings) listingsShown = dateResult.mediaListings;
         } else {
             const filters = understanding;
+
+            // Passive capture — most people never volunteer their name here,
+            // but if they do ("Hi, I'm Kofi..."), take it for free. COALESCE
+            // inside means it can never overwrite a name already on file.
+            await updateLeadNameIfMissing(leadId, filters.stated_name);
 
             // Everything the lead has told us, merged into one durable picture:
             // what they said before, plus whatever this message added or

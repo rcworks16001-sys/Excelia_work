@@ -82,6 +82,18 @@ filtered so a subset can never be mistaken for it.
   `resend` is still an unused dependency.
 
 ### ⏳ Actually pending
+- **Client request (2026-08-23): qualifying questions ask city before neighbourhood, and the bot now
+  captures the lead's name.** Location ordering is enforced by one rule in `BASE_PERSONA`
+  (`replyComposer.js`) — never ask for a neighbourhood before the city is known. Name capture happens
+  in exactly one place, once: `composeAskDatetime`'s `needsName` flag asks for it alongside the date
+  question, ONLY on the first ask, and ONLY when `leadName` (threaded from `getOrCreateLead`, which now
+  returns `name`) is null — i.e. WhatsApp gave no profile name and nothing has captured one yet. A
+  re-ask (`isReAsk`) must NEVER ask for the name again, even though the model can see the earlier
+  unanswered ask in history — this has to be an explicit instruction in the prompt, not left to
+  inference, or the model reliably re-asks anyway (caught by a smoke scenario). `stated_name` is also
+  extracted passively by the main NLU, so a lead who introduces themselves unprompted is captured for
+  free. All writes go through `updateLeadNameIfMissing()` (COALESCE — can only fill a blank, never
+  overwrite a name already on file). See scenarios 41-42 in `smoke-bot.js`.
 - **Location coordinates are neighbourhood-level approximations, not exact addresses.** Replace with real coordinates when the client supplies them.
 - **Only 1 of 13 listings has a video** (Baguida villa) — the client has only sent one video file so far. The bot will only visibly demo video-sending if that specific listing comes up in a search.
 - **Known minor debt, not fixed:** the frontend re-implements `formatXOF()`/`formatDate()` independently in 3 separate page files (properties, lead detail, appointments) instead of one shared utility — violates the spirit of the "one shared utility" rule below, which was written with only the backend's `utils/format.js` in mind. Worth consolidating into a `frontend/lib/format.js` next time one of those files is touched.

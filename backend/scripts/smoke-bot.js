@@ -576,6 +576,49 @@ const run = async () => {
         check('booking flow survived', r.pendingAction === 'awaiting_viewing_selection', `pending=${r.pendingAction}`);
     });
 
+    // ── Scenarios 40-42: qualifying-question order, and name capture ──
+
+    await scenario('QUALIFYING ORDER: location questions lead with city, not neighbourhood', async (p) => {
+        const r = await send(p, 'Hello');
+        check('asks about city, not a bare "area"', /\bcity\b/i.test(r.reply), r.reply);
+        check('does not lead with neighbourhood', !/^.*neighbourhood.*city/is.test(r.reply), r.reply);
+    });
+
+    await scenario('NAME: asked once at booking when nothing else supplied one, then stored', async (p) => {
+        // send() always passes a contactName, which would give this lead a
+        // name from turn one (exactly what the next scenario tests) — bypass
+        // it here to actually simulate WhatsApp giving no profile name.
+        const say = (t) => wh.processInboundMessage({ phone: p, text: t, contactName: null, messageType: 'text' });
+        await say('I want to rent a villa in Lome');
+        const ask = await say('1');
+        check('asked for date AND name in one message',
+            /name/i.test(ask.replyText) && /date|when/i.test(ask.replyText), ask.replyText);
+
+        const booked = await say('Kofi, tomorrow 11am');
+        const after = await getLeadState(p);
+        check('booking still completed', !after.pendingAction, `pending=${after.pendingAction}`);
+        const { rows } = await pool.query('SELECT name FROM leads WHERE id = $1', [after.id]);
+        check('name stored', rows[0].name === 'Kofi', `name=${rows[0].name}`);
+
+        // Re-ask must never nag for a name twice.
+        const p2 = `${p}B`;
+        await cleanup(p2);
+        const say2 = (t) => wh.processInboundMessage({ phone: p2, text: t, contactName: null, messageType: 'text' });
+        await say2('I want to rent a villa in Lome');
+        await say2('1');
+        const reAsk = await say2('not sure yet'); // unparseable -> re-ask
+        check('re-ask does not ask for a name again', !/name/i.test(reAsk.replyText), reAsk.replyText);
+        await cleanup(p2);
+    });
+
+    await scenario('NAME: a WhatsApp-supplied name is trusted, never re-asked', async (p) => {
+        // send() always passes contactName: 'Smoke Test' — the equivalent of
+        // WhatsApp already having supplied a profile name.
+        await send(p, 'I want to rent a villa in Lome');
+        const ask = await send(p, '1');
+        check('does not ask for a name when one is already on file', !/name/i.test(ask.reply), ask.reply);
+    });
+
     console.log(`\n${'='.repeat(72)}`);
     if (skipped > 0) {
         // Stated loudly: a green partial run is not a green suite, and this

@@ -31,7 +31,8 @@ Voice rules — follow ALL of them:
 - Never promise anything on the agency's behalf (no discounts, no availability guarantees, no viewing times).
 - CRITICAL — never state or imply that an action has been taken unless THIS prompt explicitly tells you it was. Do not say a viewing is booked, confirmed, registered, or passed to the team, and do not say anyone will call them back, unless you are told so here. The conversation history may show a customer ASKING to book; that is not the same as a booking existing. If you are unsure whether something happened, do not mention it at all.
 - Never mention that you are an AI, a model, or that you performed a database search.
-- Plain text only. A single emoji is acceptable at most, and only in a greeting.`;
+- Plain text only. A single emoji is acceptable at most, and only in a greeting.
+- When asking about location and you don't know it yet, ask for the CITY first (e.g. Lomé or Noèpé) — never ask for a specific neighbourhood before you know the city. Only ask about a neighbourhood as a follow-up once the city is known, and only if it would genuinely help.`;
 
 // Compact, token-cheap view of the listings — enough for the model to write
 // naturally around them, without dumping every column.
@@ -207,7 +208,7 @@ const composeNoResults = async ({ lang, userMessage, history }) => {
 
 Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
 
-Your task: tell the customer nothing currently matches, then ask ONE specific, useful follow-up question that would help you find something (for example about their budget, preferred area, or property type — pick whichever they did NOT already tell you). Do not apologise more than once.${historyBlock(history)}`;
+Your task: tell the customer nothing currently matches, then ask ONE specific, useful follow-up question that would help you find something (for example about their city, budget, or property type — pick whichever they did NOT already tell you). Do not apologise more than once.${historyBlock(history)}`;
 
     const user = `The customer wrote: "${userMessage}"
 
@@ -225,7 +226,7 @@ Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
 
 Your task: ALWAYS open with a warm greeting — never jump straight into a question. ${isNewLead
         ? 'This is their very first message to us, so welcome them to EXCELIA properly.'
-        : 'They have contacted us before, so greet them back warmly like a returning customer ("Hello again!" / "Bonjour, ravi de vous revoir !") WITHOUT repeating the full introduction.'} Then invite them to say what they are looking for, mentioning naturally that they can tell you the area, the type of property, their budget, or the number of bedrooms — never as a rigid list or a form.${historyBlock(history)}`;
+        : 'They have contacted us before, so greet them back warmly like a returning customer ("Hello again!" / "Bonjour, ravi de vous revoir !") WITHOUT repeating the full introduction.'} Then invite them to say what they are looking for, mentioning naturally that they can tell you the city, the type of property, their budget, or the number of bedrooms — never as a rigid list or a form.${historyBlock(history)}`;
 
     const user = `The customer wrote: "${userMessage}"
 
@@ -462,18 +463,24 @@ Your task: the customer has said they'd like to book a viewing, but hasn't said 
 };
 
 // ── composeAskDatetime ──
-const composeAskDatetime = async ({ lang, propertyLabel, history, isReAsk }) => {
+// `needsName`: true only on the FIRST ask, and only when nothing already
+// supplied a name (neither WhatsApp's own profile name nor an earlier
+// self-introduction — see getOrCreateLead / updateLeadNameIfMissing). Never
+// set on a re-ask: nagging for a name a second time, on top of a second date
+// request, is exactly the kind of friction the doc warns against, and one
+// genuine attempt is enough — a booking must never be blocked on it.
+const composeAskDatetime = async ({ lang, propertyLabel, history, isReAsk, needsName }) => {
     const system = `${BASE_PERSONA}
 
 Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
 
-Your task: ${isReAsk ? 'you already asked this customer for a date and they replied with something else, so ask again in COMPLETELY DIFFERENT words, briefly acknowledging their message first. Do not repeat your earlier phrasing, and do not ask which property — that is already settled.' : 'the customer has chosen a property to view. Confirm their choice briefly and ask what date and time would suit them.'} One or two short sentences.
+Your task: ${isReAsk ? `you already asked this customer for a date and they replied with something else, so ask again in COMPLETELY DIFFERENT words, briefly acknowledging their message first. Do not repeat your earlier phrasing, and do not ask which property — that is already settled. Even if the conversation above shows you also asked for their name and they have not given it, do NOT ask for it again here — one attempt at that was enough, and repeating it would nag them right when they're already struggling to reply. Ask ONLY about the date/time.` : 'the customer has chosen a property to view. Confirm their choice briefly and ask what date and time would suit them.'}${needsName ? ' Also ask for their name in the SAME message, naturally — e.g. so the office knows who to expect for the visit. Do not turn this into two separate questions; weave it into one natural sentence.' : ''} One or two short sentences${needsName ? ' (may run to three to fit the name in naturally)' : ''}.
 
 You may refer to the chosen property as: "${propertyLabel}". Do not state its price or any other detail.${historyBlock(history)}`;
 
     const user = 'Write the reply.';
 
-    return callComposer(system, user, BOT_STRINGS.ask_datetime[lang]);
+    return callComposer(system, user, needsName ? BOT_STRINGS.ask_datetime_and_name[lang] : BOT_STRINGS.ask_datetime[lang]);
 };
 
 // ── composeBookingConfirmed ──
