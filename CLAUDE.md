@@ -99,7 +99,7 @@ After every change, ask yourself each of these before finishing:
 
 ### No duplicated business logic
 - `sendWhatsAppMessage()` exists once, in `webhookController.js`. Import it everywhere else that needs it. Never copy-paste it.
-- Property search/filter logic exists once, in `propertyController.js` (`searchProperties` for the dashboard's exact-match contract, `searchPropertiesWithFallback` for the bot's progressive-relaxation contract — both share one `buildQuery()` helper, so there is still only one query builder).
+- Property search/filter logic exists once, in `propertyController.js` (`searchProperties` for the dashboard's exact-match contract via `buildQuery()`; `rankPropertiesForLead` for the bot, which scores rather than filters — see "Property matching is scored, not filtered").
 - Language detection exists once, in a shared utility. Never repeat it.
 - XOF price formatting exists once, in a shared utility. Never repeat it.
 - Property description translation exists once, in `utils/translate.js` (`translateToEnglish` / `translateToFrench`). Never call the Anthropic API directly for this elsewhere.
@@ -248,6 +248,31 @@ decision space instantly.
 - Never extract a field nothing consumes. An unused schema field degrades extraction of the fields
   that matter (this is why emotion/objection are deferred until something branches on them).
 
+### Property matching is scored, not filtered (`utils/propertyMatcher.js`)
+The bot no longer walks a progressive-relaxation cascade (that function is gone). It calls
+`rankPropertiesForLead`, which fetches the available catalogue and **scores** every listing.
+
+- **Why scoring, not a weighted sort over filtered rows:** a score computed over rows that already
+  passed a hard `WHERE` on the same fields is *constant* — every survivor matches every criterion, so
+  it provably reorders nothing. Ranking only means anything if near-misses are in the candidate set.
+- **`listing_status = 'available'` is the ONLY hard filter.** Everything else is soft. A rented listing
+  is not a preference to trade off.
+- **Match reasons (`✓`/`✗`) are rendered from the score, never written by the model** — same
+  deterministic-facts boundary as the listing cards themselves.
+- **Only criteria the lead actually stated produce a reason line.** `BASE_PERSONA` forbids implying a
+  result matches something they never asked for, and "✓ Within your budget" at someone who never gave
+  a budget is exactly that. There is a smoke scenario asserting a no-criteria search emits no `✓`/`✗`
+  at all.
+- **`describeRelaxation` keys off the matcher's criterion names** (`location`/`budget`/`bedrooms`/
+  `type`/`transaction`), not the old cascade's filter names. If they drift apart it returns `''` and
+  the bot silently stops admitting the top result isn't an exact match — a dishonesty regression with
+  no error.
+- `MAX_LISTINGS_SHOWN` equals `MAX_LISTINGS_WITH_PHOTOS` on purpose; they were 10 and 3, so a lead
+  could get ten cards and three sets of photos with nothing explaining the gap.
+- **`reject_property` is not `decline`.** Turning down one listing is a refinement signal and keeps the
+  flow alive; only `decline` ends a booking. Rejected ids sink in later rankings rather than being
+  removed — if it's all we have, showing it beats showing nothing.
+
 ### Scoring, escalation and notifications
 - **`leadScoring.js` is pure code.** Every point traces to something the lead actually did, so "why is
   this lead hot?" has an answer. The blueprint's "+10 for providing a phone number" is deliberately
@@ -349,7 +374,7 @@ The bot extracts these fields from free text using Claude:
 
 Two search functions in `propertyController.js`, sharing one `buildQuery()` helper (never duplicate the query logic):
 - **`searchProperties(filters)`** — the dashboard/exact-match contract. Match on all provided fields (`ILIKE` for city/neighbourhood, exact for type/bedrooms, `price <= price_max * 1.1`). If no results, relax neighbourhood once and return the 3 closest. Kept simple and predictable for any future dashboard search UI.
-- **`searchPropertiesWithFallback(filters)`** — what the **bot** actually uses. Never dead-ends: walks a relaxation cascade (drop neighbourhood → bedrooms → type → city → price, in that "least painful first" order) until something matches, and returns `{ listings, relaxed }` so the reply can honestly say what it had to widen instead of implying an exact match. This exists because the bot used to return zero results and a dead-end reply for entirely reasonable queries.
+- **`rankPropertiesForLead(filters, { limit, lang, rejectedIds })`** — what the **bot** actually uses. Fetches the available catalogue and scores every listing via `utils/propertyMatcher.js`, returning the best few with per-listing `matchReasons`. It never dead-ends (a near miss ranks lower rather than being filtered out) and never silently substitutes (the mismatch is printed as `✗`). It replaced a progressive-relaxation cascade — see "Property matching is scored, not filtered" for why a weighted sort over hard-filtered rows cannot work.
 
 The Claude extraction prompt is built dynamically per call (`buildNluSystemPrompt()` in `webhookController.js`), injecting `propertyController.getKnownLocations()`'s live city/neighbourhood pairs, plus explicit market-vocabulary guidance (e.g. "1bhk"/"studio" → `chambre_salon` with 1 bedroom, never `appartement` — a real bug where this mapping was wrong caused a common query to return zero results).
 
@@ -480,7 +505,7 @@ excelia/
 │       │   └── auth.js                ← authenticateAdmin middleware
 │       ├── controllers/
 │       │   ├── webhookController.js   ← WhatsApp inbound + ALL bot logic: NLU (extractSearchFilters/extractViewingSelection/extractAppointmentDateTime), booking-flow handlers, sendWhatsAppMessage/Image/Video/Location, sendListingMedia
-│       │   ├── propertyController.js  ← searchProperties()/searchPropertiesWithFallback(), getKnownLocations(), create/remove, photo+video upload/delete — used by bot AND dashboard
+│       │   ├── propertyController.js  ← searchProperties() (dashboard) / rankPropertiesForLead() (bot), getKnownLocations(), create/remove, photo+video upload/delete, listing status
 │       │   ├── leadController.js      ← lead CRUD, getRecentConversation() (bot memory), booking pending-flow state, status pipeline, updateNotes, sendReply
 │       │   ├── appointmentController.js ← booking logic, updateStatus
 │       │   └── authController.js      ← login endpoint (username/password → ADMIN_TOKEN)

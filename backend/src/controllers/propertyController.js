@@ -1,4 +1,5 @@
 const pool = require('../db/index');
+const { rankProperties } = require('../utils/propertyMatcher');
 const cloudinary = require('../utils/cloudinary');
 const { translateToEnglish, translateToFrench } = require('../utils/translate');
 
@@ -85,10 +86,11 @@ const buildQuery = (filters, limit) => {
         values.push(Math.round(filters.price_ceiling));
         conditions.push(`price <= $${values.length}`);
     }
-    // Bot-only contract (see searchPropertiesWithFallback) — never dropped by
-    // its relaxation cascade, unlike every other filter above. searchProperties()
-    // (the dashboard/exact-match contract) never sets this, so it still sees
-    // every status.
+    // Optional availability filter. The bot's path (rankPropertiesForLead)
+    // applies this in its own query; this flag exists for any caller of
+    // buildQuery that wants it. searchProperties() — the dashboard's
+    // exact-match contract — deliberately does NOT set it, so the admin can
+    // still find rented and reserved listings.
     if (filters.available_only) {
         conditions.push(`listing_status = 'available'`);
     }
@@ -115,61 +117,27 @@ const searchProperties = async (filters = {}) => {
     return rows; // may still be empty
 };
 
-// ── searchPropertiesWithFallback(filters) ──
-// What the BOT uses. Same query builder as searchProperties (no duplicated
-// search logic) but never dead-ends: it widens the search step by step until
-// something matches, and reports which constraints it had to drop so the
-// reply can say so honestly instead of pretending it was an exact match.
+// ── rankPropertiesForLead(filters, { limit, lang, rejectedIds }) ──
+// What the BOT uses to find listings. Replaced an earlier relaxation cascade
+// (drop neighbourhood, then bedrooms, then type... until something matched)
+// with soft matching: fetch the available catalogue, score
+// every listing against what the lead asked for, return the best few WITH the
+// reasons they scored that way.
 //
-// Drop order is "least painful first". price_max is held onto the longest —
-// showing someone a 6 000 000 F CFA plot when they asked for 35 000 is worse
-// than showing them a different neighbourhood — and is only dropped as an
-// explicit last resort.
+// The only hard filter is availability — a rented listing must never surface,
+// and unlike every other criterion that is not a preference to trade off. See
+// utils/propertyMatcher.js for why the rest is scored rather than filtered.
 //
-// Returns { listings, relaxed: ['neighbourhood', 'bedrooms', ...] }.
-// `relaxed` is empty when the strict search matched.
-const searchPropertiesWithFallback = async (filters = {}) => {
-    // `transaction` is dropped AFTER type on purpose. Only the two land plots
-    // are for sale, so someone asking to buy a villa has no strict match —
-    // dropping type first offers them what IS for sale (land) before falling
-    // back to offering rentals, which is the more useful order. Either way the
-    // widening is reported back and admitted in the reply rather than passed
-    // off as an exact match.
-    const steps = [
-        { drop: [] },
-        { drop: ['neighbourhood'] },
-        { drop: ['neighbourhood', 'bedrooms'] },
-        { drop: ['neighbourhood', 'bedrooms', 'type'] },
-        { drop: ['neighbourhood', 'bedrooms', 'type', 'transaction'] },
-        { drop: ['neighbourhood', 'bedrooms', 'type', 'transaction', 'city'] },
-        // price_ceiling drops WITH price_max — they express the same constraint
-        // (see buildQuery), so relaxing one while keeping the other would leave
-        // the budget silently enforced by the survivor.
-        { drop: ['neighbourhood', 'bedrooms', 'type', 'transaction', 'city', 'price_max', 'price_ceiling'] },
-    ];
-
-    // A wide-open query ("anything cheap?") would otherwise return 10 full
-    // listing cards — a wall of text in WhatsApp. Show a browsable handful
-    // instead; the lead can narrow down from there.
-    const hasAnyFilter = ['city', 'neighbourhood', 'type', 'price_max', 'price_ceiling', 'bedrooms', 'transaction']
-        .some((f) => filters[f] !== undefined && filters[f] !== null);
-    const strictLimit = hasAnyFilter ? 10 : 5;
-
-    for (const step of steps) {
-        // Only count a constraint as "relaxed" if it was actually set — a
-        // dropped filter the user never gave isn't something to apologise for.
-        const relaxed = step.drop.filter((f) => filters[f] !== undefined && filters[f] !== null);
-        // available_only is NOT part of the relaxation cascade — a rented or
-        // reserved listing must never appear in bot search results, no matter
-        // how far the search has to widen otherwise.
-        const attemptFilters = { ...filters, available_only: true };
-        for (const field of step.drop) attemptFilters[field] = null;
-
-        const listings = await runSearch(attemptFilters, step.drop.length === 0 ? strictLimit : 3);
-        if (listings.length > 0) return { listings, relaxed };
-    }
-
-    return { listings: [], relaxed: [] }; // only if the table is empty
+// SCALE NOTE: this fetches the whole available catalogue (13 listings today) and
+// ranks in memory, which is far cheaper than the 1-6 sequential queries the old
+// cascade ran. If the catalogue ever reaches a few hundred, add a coarse SQL
+// pre-filter (city + transaction) before scoring rather than reinstating hard
+// filters on everything.
+const rankPropertiesForLead = async (filters = {}, { limit = 3, lang = 'fr', rejectedIds = [] } = {}) => {
+    const result = await pool.query(
+        `SELECT ${PROPERTY_COLUMNS} FROM properties WHERE listing_status = 'available'`
+    );
+    return rankProperties(result.rows, filters, { limit, lang, rejectedIds });
 };
 
 // ── getKnownLocations() ──
@@ -493,7 +461,7 @@ const updateListingStatus = async (req, res) => {
 };
 
 module.exports = {
-    searchProperties, searchPropertiesWithFallback, search, getPropertyById, list,
+    searchProperties, rankPropertiesForLead, search, getPropertyById, list,
     uploadPhoto, deletePhoto, uploadVideo, deleteVideo, getKnownLocations,
     create, remove, updateListingStatus,
     VALID_PROPERTY_TYPES, VALID_LISTING_STATUSES, VALID_TRANSACTIONS,

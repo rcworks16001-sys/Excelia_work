@@ -46,24 +46,29 @@ const summariseListings = (listings, lang) =>
 
 // Human-readable description of what the search had to widen, so the model
 // can explain it honestly rather than implying an exact match.
+// `relaxed` now carries the match-criterion keys emitted by
+// utils/propertyMatcher (location / budget / bedrooms / type / transaction),
+// not the old cascade's filter names. These MUST stay in step: an unrecognised
+// key makes this return '' and the bot silently stops admitting that the top
+// result isn't what was asked for — a dishonesty regression with no error.
 const describeRelaxation = (relaxed, filters) => {
     if (!relaxed || relaxed.length === 0) return '';
     const parts = [];
-    if (relaxed.includes('neighbourhood') && filters.neighbourhood) parts.push(`the neighbourhood "${filters.neighbourhood}"`);
-    if (relaxed.includes('bedrooms') && filters.bedrooms) parts.push(`exactly ${filters.bedrooms} bedroom(s)`);
-    if (relaxed.includes('type') && filters.type) parts.push(`the property type they asked for`);
-    // Showing a buyer rental listings (or vice versa) is the widening most
+    if (relaxed.includes('location')) {
+        parts.push(filters.neighbourhood ? `the neighbourhood "${filters.neighbourhood}"` : `the area they asked for`);
+    }
+    if (relaxed.includes('bedrooms')) parts.push(`the number of bedrooms they asked for`);
+    if (relaxed.includes('type')) parts.push(`the property type they asked for`);
+    // Showing a buyer rental listings (or vice versa) is the mismatch most
     // likely to waste their time — say it plainly, not as "the type".
     if (relaxed.includes('transaction') && filters.transaction) {
         parts.push(filters.transaction === 'sale'
             ? 'being for sale (these are rentals)'
             : 'being for rent (these are for sale)');
     }
-    if (relaxed.includes('city') && filters.city) parts.push(`the city "${filters.city}"`);
-    if ((relaxed.includes('price_max') && filters.price_max)
-        || (relaxed.includes('price_ceiling') && filters.price_ceiling)) parts.push(`their stated budget`);
+    if (relaxed.includes('budget')) parts.push(`their stated budget`);
     if (parts.length === 0) return '';
-    return `IMPORTANT: there was no exact match. You had to widen the search — these results do NOT match ${parts.join(' and ')}. Acknowledge this honestly and briefly in your opening line, so the customer is not misled into thinking these are exact matches.`;
+    return `IMPORTANT: the closest match is not an exact one — it does NOT match ${parts.join(' and ')}. Acknowledge this honestly and briefly in your opening line so the customer is not misled. Each listing below is already marked with what it does and does not match, so do NOT list those details yourself.`;
 };
 
 // Renders the stored transcript as readable dialogue, and — crucially —
@@ -242,6 +247,27 @@ Your task: the customer asked about something unrelated to property. Politely an
 Write the redirect.`;
 
     return callComposer(system, user, BOT_STRINGS.off_topic[lang]);
+};
+
+// ── composeAskRejectionReason ──
+// They turned one down without saying why. "Okay" is a wasted turn; asking
+// WHAT was wrong is what turns a rejection into a better next search — and
+// offering concrete options ("the price, the area, or the size?") is far easier
+// to answer than an open "why not?".
+const composeAskRejectionReason = async ({ lang, userMessage, propertyLabel, history }) => {
+    const system = `${BASE_PERSONA}
+
+Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
+
+Your task: the customer has just said they don't like one of the properties you showed. Acknowledge that easily and without any pushback, then ask what specifically didn't work — offering them the likely options to choose from (the price, the area, or the size) rather than an open-ended "why?".
+
+Do NOT try to talk them back into it. Do NOT re-describe the property. Do NOT apologise more than once. One or two short sentences.${propertyLabel ? `\n\nYou may refer to it as: "${propertyLabel}". Do NOT state its price or any other detail.` : ''}${historyBlock(history)}`;
+
+    const user = `The customer wrote: "${userMessage}"
+
+Write the reply.`;
+
+    return callComposer(system, user, BOT_STRINGS.ask_rejection_reason[lang]);
 };
 
 // ── composeHandoff ──
@@ -429,6 +455,7 @@ module.exports = {
     composeGreeting,
     composeOffTopic,
     composeHandoff,
+    composeAskRejectionReason,
     composeUnsupportedMedia,
     composeLanguageSwitch,
     composeClosing,

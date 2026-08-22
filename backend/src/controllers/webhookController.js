@@ -5,10 +5,10 @@ const { z } = require('zod/v4');
 const { zodOutputFormat } = require('@anthropic-ai/sdk/helpers/zod');
 
 const pool = require('../db/index');
-const { searchPropertiesWithFallback, getPropertyById, getKnownLocations } = require('./propertyController');
+const { rankPropertiesForLead, getPropertyById, getKnownLocations } = require('./propertyController');
 const {
-    getProfile, mergeProfile, recordShownListings, recordInterest, profileToSearchFilters,
-    flagForHuman, refreshLeadSignals,
+    getProfile, mergeProfile, recordShownListings, recordInterest, recordRejectionReason,
+    profileToSearchFilters, flagForHuman, refreshLeadSignals,
 } = require('./leadProfileController');
 const { recordEvent, EVENT_TYPES } = require('./leadEventController');
 const { createNotification } = require('./notificationController');
@@ -20,6 +20,7 @@ const {
     composeOffTopic,
     composeUnsupportedMedia,
     composeHandoff,
+    composeAskRejectionReason,
     composeLanguageSwitch,
     composeClosing,
     composeBookingPrompt,
@@ -186,6 +187,10 @@ const sendWhatsAppLocation = async (to, latitude, longitude, name, address) => {
 // Sends photos for a shown listing (if it has any) and logs each send to the
 // conversation transcript. Capped — sending every photo for every listing
 // shown would flood the chat (up to 10 listings can be returned at once).
+// How many listing cards a search reply shows. Deliberately equal to
+// MAX_LISTINGS_WITH_PHOTOS: they were 10 and 3, so a lead could receive ten
+// text cards and photos for only the first three, with nothing explaining why.
+const MAX_LISTINGS_SHOWN = 3;
 const MAX_LISTINGS_WITH_PHOTOS = 3;
 const MAX_PHOTOS_PER_LISTING = 2;
 
@@ -479,13 +484,20 @@ const ViewingSelectionSchema = z.object({
     // 'wants_human' is an ESCAPE, not an exit: negotiating a price or asking
     // for an agent mid-booking must reach a person WITHOUT destroying the
     // viewing they were arranging. It escalates and keeps the flow alive.
-    decision: z.enum(['decline', 'select', 'express_interest', 'wants_to_book', 'new_search', 'request_media', 'question', 'greeting', 'closing', 'wants_human', 'unclear']),
+    // 'reject_property' is about ONE listing they didn't like — distinct from
+    // 'decline', which ends the whole booking. "I don't like the first one" is
+    // a refinement signal, not a goodbye; treating it as one used to end the
+    // conversation on someone who was still shopping.
+    decision: z.enum(['decline', 'select', 'express_interest', 'reject_property', 'wants_to_book', 'new_search', 'request_media', 'question', 'greeting', 'closing', 'wants_human', 'unclear']),
     selected_number: z.number().int().nullable(),
     handoff_reason: z.enum(['asked_for_agent', 'negotiation', 'complaint', 'legal_or_financial']).nullable(),
+    // Why they turned it down, when they say. null means they just said "no" —
+    // which is the cue to ask.
+    rejection_reason: z.enum(['price', 'location', 'size', 'type', 'other']).nullable(),
 });
 
 const extractViewingSelection = async (text, listingCount, history = []) => {
-    const fallback = { decision: 'unclear', selected_number: null, handoff_reason: null };
+    const fallback = { decision: 'unclear', selected_number: null, handoff_reason: null, rejection_reason: null };
     if (!text || !text.trim()) return fallback;
 
     try {
@@ -501,6 +513,7 @@ const extractViewingSelection = async (text, listingCount, history = []) => {
   * "new_search" — they are changing or refining what they're looking for rather than picking from the list ("actually under 400000", "do you have apartments instead?", "what about Bè?", "something cheaper"). This is a NEW requirement, not a selection.
   * "request_media" — they are asking to SEE more of a specific listing rather than to book it ("can you share some photos of 1", "more pictures of the second one", "send me the video", "où se trouve le 2 ?"). Set selected_number to the listing they mean. Wanting to look at photos is NOT the same as choosing to book a viewing.
   * "question" — they are ASKING something about a listing rather than choosing ("what is the price of 2?", "how many bedrooms?", "where is it?"). Set selected_number if they name one.
+  * "reject_property" — they DISLIKE one of the listings shown, without ending the conversation ("I don't like the first one", "not the second one", "le 1 ne me plaît pas", "the villa is too expensive"). Set selected_number. Set rejection_reason if they say WHY ("too expensive" -> "price", "too far"/"wrong area" -> "location", "too small"/"not enough rooms" -> "size", "I wanted an apartment" -> "type"); leave rejection_reason null if they just said no. This is NOT a decline — they are still looking.
   * "wants_human" — they need a person: asking to speak to an agent, trying to NEGOTIATE the price or terms ("can you lower the price?", "c'est négociable ?", "any discount?"), complaining, or asking a legal/financial/contractual question. Set handoff_reason. Note this is different from "question" — asking what the price IS is a question; asking for it to be CHANGED is a negotiation only a person can handle.
   * "greeting" — a greeting or pleasantry ("hello", "hi", "bonjour", "ca va ?"). NOT a selection and NOT a decline.
   * "closing" — thanks / goodbye ("thanks", "merci", "ok great"). NOT a decline of the booking.
@@ -594,7 +607,20 @@ const formatListingsBody = (listings, lang) => {
         // translated yet, so an English lead still gets the details.
         const description = lang === 'en' ? (p.description_en || p.description) : p.description;
         const descriptionPart = description ? `\n${description}` : '';
-        return `${i + 1}. ${typeLabel} — ${p.neighbourhood}, ${p.city}${bedroomsPart} — ${formatXOF(p.price)}${descriptionPart}\nContact: ${p.agency_contact}`;
+
+        // "Why this one" — rendered from the match scores, never written by the
+        // model. Every line traces to a criterion the lead actually stated
+        // (propertyMatcher emits nothing for criteria they didn't), so this
+        // can't drift into implying a match that was never asked for.
+        //
+        // ✗ lines matter as much as ✓ ones: naming the trade-off out loud is
+        // what lets someone judge a near-miss instead of being quietly handed a
+        // substitute and left to spot the difference themselves.
+        const reasonPart = (p.matchReasons && p.matchReasons.length)
+            ? `\n${p.matchReasons.map((r) => `${r.matched ? '✓' : '✗'} ${r.label}`).join('  ')}`
+            : '';
+
+        return `${i + 1}. ${typeLabel} — ${p.neighbourhood}, ${p.city}${bedroomsPart} — ${formatXOF(p.price)}${reasonPart}${descriptionPart}\nContact: ${p.agency_contact}`;
     });
     return lines.join('\n\n');
 };
@@ -671,6 +697,40 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
             text: await composeMidFlowAcknowledgement({
                 lang, userMessage: text, history, stillNeeded: 'selection', listingCount: pendingListingIds.length,
             }),
+            mediaListings: null,
+        };
+    }
+
+    // They turned ONE listing down. Not a decline — they're still shopping, so
+    // the flow stays alive. Record it (so it sinks in future rankings) and
+    // either use the reason they gave or ask for it, because "which part didn't
+    // work" is what makes the next set better rather than just different.
+    if (
+        selection.decision === 'reject_property' &&
+        Number.isInteger(selection.selected_number) &&
+        selection.selected_number >= 1 &&
+        selection.selected_number <= pendingListingIds.length
+    ) {
+        const propertyId = pendingListingIds[selection.selected_number - 1];
+        await recordInterest(leadId, propertyId, { liked: false });
+        await recordEvent(leadId, EVENT_TYPES.PROPERTY_REJECTED, {
+            propertyId, metadata: { reason: selection.rejection_reason || 'unstated' },
+        });
+
+        if (selection.rejection_reason) {
+            await recordRejectionReason(leadId, propertyId, selection.rejection_reason);
+            // They told us why, so re-searching now beats interrogating them.
+            // Returning null hands control back to the search path, which
+            // re-ranks with this listing sunk.
+            return null;
+        }
+
+        const property = await getPropertyById(propertyId);
+        const propertyLabel = property
+            ? `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`
+            : '';
+        return {
+            text: await composeAskRejectionReason({ lang, userMessage: text, propertyLabel, history }),
             mediaListings: null,
         };
     }
@@ -1086,7 +1146,19 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                 // Filters come from the PROFILE, not this one message, so a
                 // requirement built up over several turns is searched in full.
                 const searchFilters = profileToSearchFilters(profile);
-                const { listings, relaxed } = await searchPropertiesWithFallback(searchFilters);
+                // Ranked, not filtered: near-misses are shown in position with
+                // an honest ✗ rather than silently dropped or silently
+                // substituted. Capped low — the doc's "show 3-5, not 20" — and
+                // aligned with sendListingMedia's own 3-listing cap, which
+                // previously meant a lead could get 10 cards but 3 sets of
+                // photos.
+                const { listings, relaxed } = await rankPropertiesForLead(searchFilters, {
+                    limit: MAX_LISTINGS_SHOWN,
+                    lang,
+                    // Things they've already turned down sink to the bottom
+                    // rather than being offered again as if new.
+                    rejectedIds: profile?.rejected_property_ids || [],
+                });
 
                 if (listings.length === 0) {
                     // Worth recording as its own event: "how often does the

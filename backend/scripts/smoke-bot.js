@@ -412,6 +412,60 @@ const run = async () => {
         check('"lost" is absorbing', status === 'lost', `status=${status}`);
     });
 
+    // ── Scenarios 30-33: matching, ranking and the rejection loop ──
+
+    await scenario('RANKING: the best match leads, not the cheapest listing', async (p) => {
+        // The old ORDER BY price ASC showed a 35 000 single room first to
+        // someone asking for a 4-bedroom villa, every single time.
+        const r = await send(p, 'I want to rent a 4 bedroom villa in Lome, budget 400000');
+        const first = r.reply.split('\n\n').find((b) => /^1\./.test(b.trim())) || '';
+        check('top result is a villa, not the cheapest room',
+            /villa/i.test(first) && !/single room|chambre/i.test(first), first.slice(0, 120));
+        check('shows why it matches', /✓/.test(r.reply), r.reply.slice(0, 200));
+    });
+
+    await scenario('MATCH REASONS: a near miss is marked, never silently substituted', async (p) => {
+        // Nothing in Bè has 3 bedrooms under 200 000, so whatever comes back
+        // MUST carry an explicit ✗ rather than being passed off as a match.
+        const r = await send(p, 'I need a 3 bedroom in Be, Lome, to rent, maximum 200000');
+        check('marks what does not match', /✗/.test(r.reply), r.reply.slice(0, 300));
+        // BASE_PERSONA forbids implying a criterion matched that was never
+        // stated. They gave no property type, so no type line should appear.
+        check('does not invent criteria they never gave',
+            !/✓\s*(Villa|Apartment|Land|Mini-villa)/.test(r.reply), r.reply.slice(0, 300));
+    });
+
+    await scenario('REASONS: nothing is claimed when nothing was asked for', async (p) => {
+        // "anything cheap" states no budget, area, type or size — so the cards
+        // must carry NO ✓/✗ lines at all. Printing "✓ Within your budget" at
+        // someone who never gave one is the exact failure BASE_PERSONA bans.
+        const r = await send(p, 'do you have anything cheap?');
+        check('returned listings', /F CFA/.test(r.reply));
+        check('no fabricated match claims', !/✓|✗/.test(r.reply), r.reply.slice(0, 250));
+    });
+
+    await scenario('REJECTION LOOP: "I don\'t like the first one" asks why, then re-ranks', async (p) => {
+        await send(p, 'I want to rent a villa in Lome');
+        const asked = await send(p, "I don't like the first one");
+        check('asked what was wrong rather than just accepting it',
+            /price|area|size|prix|quartier|taille/i.test(asked.reply), asked.reply);
+        // Turning one listing down is NOT declining the whole conversation.
+        check('booking flow still alive', asked.pendingAction === 'awaiting_viewing_selection', `pending=${asked.pendingAction}`);
+
+        const lead = await getLeadState(p);
+        const prof = await getProfile(lead.id);
+        check('rejection recorded', (prof.rejected_property_ids || []).length === 1,
+            `rejected=${JSON.stringify(prof.rejected_property_ids)}`);
+
+        // Giving the reason should re-search rather than interrogate further.
+        const after = await send(p, 'it was too expensive');
+        check('re-ranked after hearing why', /F CFA/.test(after.reply), after.reply.slice(0, 200));
+        const prof2 = await getProfile(lead.id);
+        check('reason stored against that property',
+            Object.keys(prof2.rejection_reasons || {}).length === 1,
+            JSON.stringify(prof2.rejection_reasons));
+    });
+
     console.log(`\n${'='.repeat(72)}`);
     console.log(failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`);
     console.log('all test leads cleaned up.\n');

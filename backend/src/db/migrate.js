@@ -46,7 +46,7 @@ const runMigrations = async () => {
         await pool.query(`ALTER TABLE properties ADD COLUMN IF NOT EXISTS video_url TEXT;`);
 
         // Availability status shown on the dashboard and enforced in bot search —
-        // a rented/reserved listing must never surface in searchPropertiesWithFallback().
+        // a rented/reserved listing must never surface in bot search results.
         // Defaults every existing row (and every new one) to 'available'.
         await pool.query(`ALTER TABLE properties ADD COLUMN IF NOT EXISTS listing_status TEXT NOT NULL DEFAULT 'available' CHECK (listing_status IN (
             'available', 'reserved', 'rented'

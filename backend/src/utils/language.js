@@ -142,6 +142,12 @@ const BOT_STRINGS = {
         fr: "Avec plaisir ! N'hésitez pas à m'écrire si vous avez besoin d'autre chose.",
         en: "You're welcome! Feel free to message me any time if you need anything else.",
     },
+    // Asked when a lead turns a listing down without saying why. The answer is
+    // what turns "no" into a better next search.
+    ask_rejection_reason: {
+        fr: "Pas de souci. Qu'est-ce qui n'allait pas — le prix, le quartier, ou la taille ?",
+        en: "No problem. What didn't work — the price, the area, or the size?",
+    },
     // Handoff. Deliberately promises only what the calling code has actually
     // done — the lead is flagged for a human in the dashboard, so saying the
     // team will get back to them is true. It must NOT promise a timeframe.

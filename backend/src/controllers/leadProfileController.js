@@ -178,26 +178,22 @@ const updateSummary = async (leadId, summary, client = pool) => {
 
 // ── profileToSearchFilters(profile) ──
 // The profile IS the search. Turning it into the filter shape
-// searchPropertiesWithFallback expects is the whole reason it is stored
+// rankPropertiesForLead expects is the whole reason it is stored
 // structurally rather than as prose.
 const profileToSearchFilters = (profile) => {
     if (!profile) return {};
-
-    // An exact bedroom count only when they named one. "2 or 3 bedrooms" spans
-    // a range that `bedrooms = $n` cannot express, so rather than silently
-    // picking one end (and hiding half of what they asked for) leave it open
-    // and let the other filters narrow it. Phase 4's soft matching handles
-    // ranges properly.
-    const bedrooms = (profile.bedrooms_min !== null && profile.bedrooms_min === profile.bedrooms_max)
-        ? profile.bedrooms_min
-        : null;
 
     return {
         city: profile.city,
         neighbourhood: profile.neighbourhood,
         type: profile.property_type,
         transaction: profile.transaction,
-        bedrooms,
+        // The range goes through intact. The old SQL path could only express
+        // `bedrooms = $n`, so "2 or 3 bedrooms" had to be collapsed or dropped;
+        // the matcher scores against the range directly, and treats one either
+        // side as a near miss worth showing rather than hiding.
+        bedrooms_min: profile.bedrooms_min,
+        bedrooms_max: profile.bedrooms_max,
         // A stated stretch is an ABSOLUTE ceiling — they have already told us
         // the most they would pay, so it goes in as price_ceiling and skips
         // the 10% tolerance buildQuery adds to price_max. Applying both would
