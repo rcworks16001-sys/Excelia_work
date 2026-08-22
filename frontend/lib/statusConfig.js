@@ -26,3 +26,16 @@ export const APPOINTMENT_STATUS_CONFIG = {
     cancelled: { label: { fr: 'Annulé', en: 'Cancelled' }, bg: 'var(--mist)', color: 'var(--fog)' },
     completed: { label: { fr: 'Terminé', en: 'Completed' }, bg: 'var(--ink)', color: '#fff' },
 };
+
+// Listing availability — mirrors the CHECK constraint on properties.listing_status
+// in backend/src/db/migrate.js. Shared by the Properties page badge + status
+// dropdown. No --red token exists in globals.css; the rest of this codebase
+// uses the raw #b91c1c red directly for destructive/warning states (delete
+// buttons, error text), so "Rented" follows that same convention here.
+export const LISTING_STATUSES = ['available', 'reserved', 'rented'];
+
+export const LISTING_STATUS_CONFIG = {
+    available: { label: { fr: 'Disponible', en: 'Available' }, bg: 'var(--green)', color: 'var(--ink)' },
+    reserved: { label: { fr: 'Réservé', en: 'Reserved' }, bg: 'var(--yellow)', color: 'var(--ink)' },
+    rented: { label: { fr: 'Loué', en: 'Rented' }, bg: '#fef2f2', color: '#b91c1c' },
+};

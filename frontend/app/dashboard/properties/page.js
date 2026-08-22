@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import api from '../../../lib/api';
 import { useDashboardLanguage } from '../../../lib/useDashboardLanguage';
 import { dashboardStrings } from '../../../lib/dashboardStrings';
+import { LISTING_STATUSES, LISTING_STATUS_CONFIG } from '../../../lib/statusConfig';
 
 const formatXOF = (amount) => {
     const n = Math.round(Number(amount));
@@ -12,7 +13,7 @@ const formatXOF = (amount) => {
     return `${Math.abs(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} F CFA`;
 };
 
-function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, onEnlarge, t, lang }) {
+function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, onListingStatusChanged, onEnlarge, t, lang }) {
     const fileInputRef = useRef(null);
     const videoInputRef = useRef(null);
     const [uploading, setUploading] = useState(false);
@@ -22,6 +23,13 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, on
     const [deleting, setDeleting] = useState(false);
     const [deleteError, setDeleteError] = useState('');
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    const [reservedForDraft, setReservedForDraft] = useState(property.reserved_for || '');
+    const [statusError, setStatusError] = useState('');
+    // Keep the draft in sync when the note changes from outside this input
+    // (e.g. cleared server-side after a status change away from 'reserved').
+    useEffect(() => {
+        setReservedForDraft(property.reserved_for || '');
+    }, [property.reserved_for]);
     const photos = property.photos || [];
     const hasPhoto = photos.length > 0;
     // The full enlargeable gallery for this listing, in display order — photo
@@ -121,6 +129,39 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, on
         }
     };
 
+    // Optimistic, mirrors handleStatusChange on the Appointments page: update
+    // local state immediately, PATCH in the background, revert on failure.
+    const handleStatusSelect = async (e) => {
+        const newStatus = e.target.value;
+        const previousStatus = property.listing_status;
+        const previousNote = property.reserved_for;
+        // Moving away from 'reserved' clears the note (mirrors what the
+        // backend does); moving TO 'reserved' keeps whatever note already
+        // existed rather than blanking a note the admin is about to re-type.
+        const nextNote = newStatus === 'reserved' ? previousNote : null;
+        setStatusError('');
+        onListingStatusChanged(property.id, newStatus, nextNote);
+        try {
+            await api.patch(`/properties/${property.id}/status`, { listing_status: newStatus, reserved_for: nextNote });
+        } catch (err) {
+            onListingStatusChanged(property.id, previousStatus, previousNote);
+            setStatusError(t.statusUpdateError);
+        }
+    };
+
+    const handleReservedForBlur = async () => {
+        const trimmed = reservedForDraft.trim();
+        if (property.listing_status !== 'reserved' || trimmed === (property.reserved_for || '')) return;
+        setStatusError('');
+        onListingStatusChanged(property.id, 'reserved', trimmed || null);
+        try {
+            await api.patch(`/properties/${property.id}/status`, { listing_status: 'reserved', reserved_for: trimmed });
+        } catch (err) {
+            onListingStatusChanged(property.id, property.listing_status, property.reserved_for);
+            setStatusError(t.statusUpdateError);
+        }
+    };
+
     return (
         <div style={{ background: '#fff', border: '1px solid var(--ice)', borderRadius: 'var(--r-card)', overflow: 'hidden' }}>
             {/* Cover photo, or a clear placeholder if none uploaded yet. */}
@@ -144,13 +185,57 @@ function PropertyCard({ property, onPhotosChanged, onVideoChanged, onDeleted, on
             </div>
 
             <div style={{ padding: 16 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 2 }}>
-                    {t.typeLabels[property.type] || property.type}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 2 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700 }}>
+                        {t.typeLabels[property.type] || property.type}
+                    </div>
+                    <span style={{
+                        fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 999, whiteSpace: 'nowrap',
+                        background: LISTING_STATUS_CONFIG[property.listing_status]?.bg || 'var(--mist)',
+                        color: LISTING_STATUS_CONFIG[property.listing_status]?.color || 'var(--ash)',
+                    }}>
+                        {LISTING_STATUS_CONFIG[property.listing_status]?.label[lang] || property.listing_status}
+                    </span>
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--fog)', marginBottom: 10 }}>
                     {property.neighbourhood}, {property.city}
                     {property.bedrooms ? ` · ${property.bedrooms} ${t.bedroomsAbbrev}` : ''}
                 </div>
+
+                <div style={{ marginBottom: 10 }}>
+                    <select
+                        value={property.listing_status}
+                        onChange={handleStatusSelect}
+                        style={{
+                            fontSize: 11, fontWeight: 600, padding: '5px 8px', borderRadius: 'var(--r-btn)',
+                            border: '1px solid var(--ice)', background: '#fff', color: 'var(--ink)', cursor: 'pointer',
+                        }}
+                    >
+                        {LISTING_STATUSES.map((s) => (
+                            <option key={s} value={s}>{LISTING_STATUS_CONFIG[s].label[lang]}</option>
+                        ))}
+                    </select>
+                    {property.listing_status === 'reserved' && (
+                        <div style={{ marginTop: 6 }}>
+                            <label style={{ display: 'block', fontSize: 10, fontWeight: 600, color: 'var(--ash)', marginBottom: 3 }}>
+                                {t.reservedForLabel}
+                            </label>
+                            <input
+                                type="text"
+                                value={reservedForDraft}
+                                onChange={(e) => setReservedForDraft(e.target.value)}
+                                onBlur={handleReservedForBlur}
+                                placeholder={t.reservedForPlaceholder}
+                                style={{
+                                    width: '100%', fontSize: 11, padding: '6px 8px', border: '1px solid var(--ice)',
+                                    borderRadius: 'var(--r-btn)', outline: 'none', color: 'var(--ink)',
+                                }}
+                            />
+                        </div>
+                    )}
+                    {statusError && <div style={{ fontSize: 11, color: '#b91c1c', marginTop: 4 }}>{statusError}</div>}
+                </div>
+
                 <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>{formatXOF(property.price)}</div>
                 {description && (
                     <p style={{ fontSize: 12, color: 'var(--ash)', lineHeight: 1.5, marginBottom: 8 }}>
@@ -481,6 +566,10 @@ export default function PropertiesPage() {
         setProperties((prev) => prev.filter((p) => p.id !== propertyId));
     };
 
+    const handleListingStatusChanged = (propertyId, listing_status, reserved_for) => {
+        setProperties((prev) => prev.map((p) => (p.id === propertyId ? { ...p, listing_status, reserved_for } : p)));
+    };
+
     const handleAddSubmit = async (e) => {
         e.preventDefault();
         setAddError('');
@@ -660,6 +749,7 @@ export default function PropertiesPage() {
                         onPhotosChanged={handlePhotosChanged}
                         onVideoChanged={handleVideoChanged}
                         onDeleted={handlePropertyDeleted}
+                        onListingStatusChanged={handleListingStatusChanged}
                         onEnlarge={(items, index) => setGallery({ items, startIndex: index })}
                         t={t}
                         lang={lang}

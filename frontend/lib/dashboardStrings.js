@@ -125,6 +125,9 @@ export const dashboardStrings = {
             deletePropertyTitle: 'Supprimer ce bien ?',
             deletePropertyWarning: 'Cette action est irréversible.',
             deletePropertyError: 'Échec de la suppression.',
+            reservedForLabel: 'Réservé pour',
+            reservedForPlaceholder: 'Nom ou description',
+            statusUpdateError: 'Échec de la mise à jour du statut.',
         },
         appointments: {
             heading: 'Rendez-vous',
@@ -247,6 +250,9 @@ export const dashboardStrings = {
             deletePropertyTitle: 'Delete this property?',
             deletePropertyWarning: 'This cannot be undone.',
             deletePropertyError: 'Failed to delete.',
+            reservedForLabel: 'Reserved for',
+            reservedForPlaceholder: 'Name or description',
+            statusUpdateError: 'Failed to update status.',
         },
         appointments: {
             heading: 'Appointments',

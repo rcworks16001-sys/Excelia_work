@@ -45,6 +45,19 @@ const runMigrations = async () => {
         // `photos` — a single Cloudinary video URL, or NULL).
         await pool.query(`ALTER TABLE properties ADD COLUMN IF NOT EXISTS video_url TEXT;`);
 
+        // Availability status shown on the dashboard and enforced in bot search —
+        // a rented/reserved listing must never surface in searchPropertiesWithFallback().
+        // Defaults every existing row (and every new one) to 'available'.
+        await pool.query(`ALTER TABLE properties ADD COLUMN IF NOT EXISTS listing_status TEXT NOT NULL DEFAULT 'available' CHECK (listing_status IN (
+            'available', 'reserved', 'rented'
+        ));`);
+
+        // Free-text note on who a 'reserved' listing is held for. Nullable — only
+        // meaningful when listing_status = 'reserved'; the PATCH endpoint clears it
+        // whenever status moves away from 'reserved' (app-level, not a DB constraint,
+        // matching how this codebase already handles similar cases).
+        await pool.query(`ALTER TABLE properties ADD COLUMN IF NOT EXISTS reserved_for TEXT;`);
+
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_properties_city ON properties (city);`);
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_properties_neighbourhood ON properties (neighbourhood);`);
         await pool.query(`CREATE INDEX IF NOT EXISTS idx_properties_type ON properties (type);`);

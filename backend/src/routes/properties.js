@@ -20,6 +20,9 @@ router.post('/', authenticateAdmin, propertyController.create);
 // DELETE /api/properties/:id — remove a listing (blocked if it has appointments)
 router.delete('/:id', authenticateAdmin, propertyController.remove);
 
+// PATCH /api/properties/:id/status — update availability, body: { listing_status, reserved_for? }
+router.patch('/:id/status', authenticateAdmin, propertyController.updateListingStatus);
+
 // GET /api/properties/search?city=&neighbourhood=&type=&bedrooms=&price_max=
 router.get('/search', authenticateAdmin, propertyController.search);
 

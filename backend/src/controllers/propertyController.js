@@ -5,7 +5,8 @@ const { translateToEnglish, translateToFrench } = require('../utils/translate');
 // Columns the bot and dashboard actually need — never SELECT *.
 const PROPERTY_COLUMNS = `
     id, city, neighbourhood, type, price, bedrooms,
-    description, description_en, photos, video_url, latitude, longitude, agency_contact
+    description, description_en, photos, video_url, latitude, longitude, agency_contact,
+    listing_status, reserved_for
 `;
 
 const PRICE_TOLERANCE = 1.1; // 10% tolerance on price_max, per CLAUDE.md search rules
@@ -13,6 +14,10 @@ const PRICE_TOLERANCE = 1.1; // 10% tolerance on price_max, per CLAUDE.md search
 // The ONE list of valid property types — matches the DB CHECK constraint on
 // properties.type in migrate.js.
 const VALID_PROPERTY_TYPES = ['chambre_salon', 'appartement', 'villa', 'terrain', 'mini_villa', 'appartement_meuble'];
+
+// The ONE list of valid listing statuses — matches the DB CHECK constraint on
+// properties.listing_status in migrate.js.
+const VALID_LISTING_STATUSES = ['available', 'reserved', 'rented'];
 
 // Client decision: no per-agency contact numbers — every listing always
 // shows the single EXCELIA office number (same value migrate.js backfills
@@ -61,6 +66,13 @@ const buildQuery = (filters, limit) => {
     if (price_max) {
         values.push(Math.round(price_max * PRICE_TOLERANCE));
         conditions.push(`price <= $${values.length}`);
+    }
+    // Bot-only contract (see searchPropertiesWithFallback) — never dropped by
+    // its relaxation cascade, unlike every other filter above. searchProperties()
+    // (the dashboard/exact-match contract) never sets this, so it still sees
+    // every status.
+    if (filters.available_only) {
+        conditions.push(`listing_status = 'available'`);
     }
 
     const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -119,7 +131,10 @@ const searchPropertiesWithFallback = async (filters = {}) => {
         // Only count a constraint as "relaxed" if it was actually set — a
         // dropped filter the user never gave isn't something to apologise for.
         const relaxed = step.drop.filter((f) => filters[f] !== undefined && filters[f] !== null);
-        const attemptFilters = { ...filters };
+        // available_only is NOT part of the relaxation cascade — a rented or
+        // reserved listing must never appear in bot search results, no matter
+        // how far the search has to widen otherwise.
+        const attemptFilters = { ...filters, available_only: true };
         for (const field of step.drop) attemptFilters[field] = null;
 
         const listings = await runSearch(attemptFilters, step.drop.length === 0 ? strictLimit : 3);
@@ -408,8 +423,43 @@ const remove = async (req, res) => {
     }
 };
 
+// ── updateListingStatus(req, res) ──
+// Dashboard availability control: Available / Reserved / Rented, plus an
+// optional reserved_for note. reserved_for is only meaningful while status is
+// 'reserved' — moving a listing to any other status clears it server-side, so
+// a stale note can never linger and resurface next time the listing is
+// reserved again.
+const updateListingStatus = async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+        return res.status(400).json({ error: 'Invalid property id' });
+    }
+
+    const { listing_status, reserved_for } = req.body || {};
+    if (!VALID_LISTING_STATUSES.includes(listing_status)) {
+        return res.status(400).json({ error: `listing_status must be one of: ${VALID_LISTING_STATUSES.join(', ')}` });
+    }
+    const note = listing_status === 'reserved' && typeof reserved_for === 'string' && reserved_for.trim()
+        ? reserved_for.trim()
+        : null;
+
+    try {
+        const result = await pool.query(
+            'UPDATE properties SET listing_status = $1, reserved_for = $2 WHERE id = $3 RETURNING id, listing_status, reserved_for',
+            [listing_status, note, id]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Property not found' });
+        }
+        res.json({ property: result.rows[0] });
+    } catch (error) {
+        console.error('Error updating property listing status:', error);
+        res.status(500).json({ error: 'Failed to update listing status' });
+    }
+};
+
 module.exports = {
     searchProperties, searchPropertiesWithFallback, search, getPropertyById, list,
     uploadPhoto, deletePhoto, uploadVideo, deleteVideo, getKnownLocations,
-    create, remove, VALID_PROPERTY_TYPES,
+    create, remove, updateListingStatus, VALID_PROPERTY_TYPES, VALID_LISTING_STATUSES,
 };

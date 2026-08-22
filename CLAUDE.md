@@ -7,8 +7,8 @@
 
 EXCELIA — a WhatsApp AI real estate chatbot for OMEGA INTELLIGENTSIA GROUP, Togo.
 Client: Antipas Komi Attisso.
-Stack: Node.js + Express (Railway) | Next.js (Vercel) | PostgreSQL | Cloudinary | WhatsApp Cloud API | Claude (Anthropic) for NLU.
-Languages: French and English (bilingual — detect per message, respond in same language).
+Stack: Node.js + Express (Railway) | Next.js (Vercel) | PostgreSQL | Cloudinary | WhatsApp Cloud API | Claude (Anthropic) for NLU and reply generation.
+Languages: French and English (bilingual — detect per message, respond in same language, switchable mid-conversation on request).
 Currency: XOF (CFA franc) — display as "45 000 F CFA". Never convert.
 
 Demo scope (build in this order):
@@ -26,52 +26,56 @@ NOT in this build: owner self-listing portal, subscription/billing, Mobile Money
 
 ---
 
-## Current build status — read this first (last updated 2026-08-21)
+## Current build status — read this first (last updated 2026-08-22)
 
 **Repo:** https://github.com/rcworks16001-sys/Excelia_work, branch `main`, remote `origin`. Push only when explicitly asked — no standing auto-push rule.
 
 ### ✅ Done and pushed — do not re-build any of this
-**Steps 1–9** (the numbered demo scope above) are all built, verified live, and pushed:
-1. Backend skeleton + working webhook verify
-2. Property search (`searchProperties()` in `propertyController.js`)
-3. NLU (Claude-based free-text → structured filters)
-4. Auto-send listing photos — bot sends photos when a listing has them (see photo-upload caveat below)
-5. Auto-send listing location — **NOT built**, see Pending below (numbered here to match the original list, not because it's done)
-6. Lead capture (`leads` + `conversations` tables)
-7. Appointment booking (multi-turn WhatsApp flow + `appointments` table)
-8. Admin dashboard — all four pages (leads, lead detail, properties, appointments)
-9. Prospect pipeline (`leads.status`, dashboard filter/editor)
 
-**Post-demo tasks 1–4** (requested after Step 9, separately from the numbered list above):
-1. Property photo infrastructure — Cloudinary upload (bulk script + dashboard button), `sendWhatsAppImage()` wired into the bot's search-result replies
-2. Contact number swap — every listing shows one static number (`+228 91062626 — EXCELIA office`) instead of the old per-listing placeholder
-3. Dashboard language toggle — FR/EN switch for the admin UI itself, independent of the bot's own bilingual conversation logic
-4. Username/password admin login — replaces the old token-paste screen; the `ADMIN_TOKEN` cookie session underneath is unchanged
+**Steps 1–9** (the numbered demo scope above) are all built, verified, and pushed. **Post-demo tasks 1–4** (photo infra, contact number swap, dashboard language toggle, username/password login) are also done — see "Key decisions" below for how each was actually implemented.
 
-**Bug fix:** the NLU couldn't resolve a bare neighbourhood name (e.g. "Avédji") without the city also being stated in the same message — fixed by injecting the DB's live city/neighbourhood list into the NLU prompt at call time.
+**Everything built in the rounds after that** (all pushed to `main`):
 
-All of the above is committed and pushed to `main` (latest relevant commit `9172ed3`).
+- **Dashboard round 1** — search/filter bars on Properties and Appointments (Leads already had one); appointment status badges + Lead Detail's "Unknown" fallback now translate with the FR/EN toggle; reply-to-lead from the dashboard (`POST /api/leads/:id/reply`, reuses `sendWhatsAppMessage`, not persisted to `conversations` by design); login page logo; **phone numbers unmasked everywhere** (Leads list, Lead Detail, Appointments — client decision, reverses the original masking rule).
+- **Dashboard round 2 (bug fixes from live testing)** — a real search bug (word-token matching instead of whole-string matching, so a copy-pasted "Neighbourhood, City" string actually matches); Togo-timezone fix for appointment date/time display (`timeZone: 'UTC'` — was silently rendering in the *viewer's* browser timezone, a real scheduling-risk bug); "demain matin"-style vague dates now show a real date instead of blank, via `requested_date` / `requested_time_of_day` columns; property type labels on Appointments/Lead Detail (were showing the raw DB enum).
+- **Property CRUD + media** — Add/Delete property from the dashboard (`POST /api/properties`, `DELETE /api/properties/:id`, **blocked with 409 if the listing has appointments** — `property_id` is `ON DELETE CASCADE`, so an unguarded delete would silently destroy booking history); in-app delete-confirmation modal (not `window.confirm`) naming the listing; multi-photo upload (loops the existing single-file endpoint); a full media lightbox with gallery navigation (arrow keys + on-screen ‹ › buttons) across photos + video; video support end-to-end (`video_url` column, Cloudinary video upload via `uploadVideo`/`deleteVideo` and the bulk script, `sendWhatsAppVideo()`, shown as a small clickable thumbnail on the dashboard, not full-width).
+- **Automatic property description translation** — `description` is always the French source of truth everywhere else in the app; `description_en` is a cached one-time translation. New properties now get **both languages filled in immediately at creation**, regardless of which one the admin typed (a FR/EN toggle on the Add Property form tells the backend which side is authoritative; the other is machine-translated once via `utils/translate.js` and cached — never re-translated per page-view or per bot reply). The original 13 seed listings were backfilled the same way via `npm run backfill-translations` (re-runnable, only touches untranslated rows).
+- **Appointment status control + Lead inline status** — appointments were read-only before; now `PATCH /api/appointments/:id/status` + a dropdown + status filter tabs (mirrors the Leads page pattern). Leads list also got an inline status `<select>` per row (previously only editable from the Lead Detail page).
+- **Lead notes** — small auto-saving textarea on Lead Detail (`leads.notes` column, `PATCH /api/leads/:id/notes`, ~800ms debounce, separate from the WhatsApp transcript, never touched by the bot).
+- **Live-ish conversation updates** — Lead Detail polls `GET /leads/:id` every 5s while the tab is visible (paused on `document.visibilitychange`), so a new WhatsApp message shows up without a manual refresh. No WebSocket infra was added — polling is the pragmatic fit for this stack. Careful merge logic so a poll never wipes out an admin's just-sent reply (which is local-only, not persisted — see above).
+- **WhatsApp location sending** — `sendWhatsAppLocation()` built; `sendListingMedia()` (renamed from `sendListingPhotos`) now fans out photos → video (top listing only) → location pin per search result. Coordinates are still neighbourhood-level demo approximations, not exact addresses.
+- **Full chatbot conversational rebuild** — this was the largest piece of work and deserves its own section below ("Conversational bot architecture"). Short version: the bot used to be stateless per message (no memory, hardcoded reply templates, a booking flow that silently destroyed itself on any off-script message) and is now context-aware, composes genuinely conversational replies via Claude while never letting the model author a fact, and survives interruptions (questions, photo requests, greetings, language-switch requests) mid-booking without losing state.
+- **`npm run smoke-bot`** — a real regression suite (18 scenarios and counting) that drives the actual exported bot handlers against the DB with disposable leads. Exists because a static NLU test alone is not enough to catch a broken booking flow — see "Conversational bot architecture" for why this is mandatory to run after any bot change.
 
 ### ⏳ Actually pending
-- **Real property photos are not uploaded yet.** The upload *infrastructure* is done, but no real image files have been added to Cloudinary/the `photos` column — still waiting on the client. Once received: drop files into `backend/photos-to-upload/<property_id>/` and run `npm run upload-photos` (it prints the id → listing mapping), or use the dashboard's per-listing "Upload photo" button.
-- **Location coordinates are neighbourhood-level approximations, not exact addresses.** `sendWhatsAppLocation()` is built and every search result now sends a map pin, but the lat/long values are still the seeded demo approximations — accurate to the area, not the street. Replace with real coordinates when the client supplies them.
-- **Admin login has no credentials set.** `ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` are blank in `.env` — the human user needs to run `node backend/scripts/hash-password.js` and set both themselves (never generate/paste real credentials into a Claude chat). The login screen rejects everyone until this is done.
-- **`WHATSAPP_TOKEN` appears expired** — outbound sends fail with Graph API code 190 ("Authentication Error"). Needs a fresh token from the Meta developer app.
-- **Unconfirmed: does Railway auto-run `migrate.js` on deploy?** If not, every future schema/data change needs `node src/db/migrate.js` run manually against production after pushing — this has been done manually each time so far.
+- **Unconfirmed: does Railway auto-run `migrate.js` on deploy?** This matters a lot now — many schema changes have shipped this session (`description_en`, `video_url`, `requested_date`, `requested_time_of_day`, `notes`). If Railway does NOT auto-run migrations, production is currently missing all of these columns until `node src/db/migrate.js` is run manually against it. **Check this before any live demo.**
+- **Location coordinates are neighbourhood-level approximations, not exact addresses.** Replace with real coordinates when the client supplies them.
+- **Only 1 of 13 listings has a video** (Baguida villa) — the client has only sent one video file so far. The bot will only visibly demo video-sending if that specific listing comes up in a search.
 - **Known minor debt, not fixed:** the frontend re-implements `formatXOF()`/`formatDate()` independently in 3 separate page files (properties, lead detail, appointments) instead of one shared utility — violates the spirit of the "one shared utility" rule below, which was written with only the backend's `utils/format.js` in mind. Worth consolidating into a `frontend/lib/format.js` next time one of those files is touched.
 
+### ✅ Previously-pending items now resolved (don't re-flag these)
+- Real property photos ARE uploaded — 12 of 13 listings have real client photos (the 13th has a video instead). Uploaded via `npm run upload-photos` from `backend/photos-to-upload/<id>/`.
+- `WHATSAPP_TOKEN` was expired (Graph API 190) — the client generated a fresh one. **Verified working** via a live, read-only Graph API call (not a message send) during this session.
+- Admin login credentials (`ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH`) — the client has set these. Login now works. (Still generated locally via `node backend/scripts/hash-password.js`, never pasted into a chat.)
+
 ### Key decisions made along the way — don't relitigate these
-- `sendWhatsAppMessage()` / `sendWhatsAppImage()` live in `webhookController.js`, **not** `utils/whatsapp.js` (the File Structure section below reflects this) — the Code Rules section's literal wording ("exists once, in webhookController.js") was followed over the old file-structure sketch.
+- `sendWhatsAppMessage()` / `sendWhatsAppImage()` / `sendWhatsAppVideo()` / `sendWhatsAppLocation()` all live in `webhookController.js`, **not** `utils/whatsapp.js` — the Code Rules section's literal wording ("exists once, in webhookController.js") was followed over the old file-structure sketch.
 - Frontend wasn't scaffolded until Step 8 — Steps 1–7 were backend-only, on purpose.
-- Contact number: kept the `agency_contact` column as-is rather than restructuring the schema — just seeded/backfilled one static value into every row. `backend/src/db/migrate.js` has an idempotent `UPDATE` for this (necessary because `seed.js` skips re-seeding once the table has rows, so it alone never touches already-live data).
+- Contact number: kept the `agency_contact` column as-is rather than restructuring the schema — just seeded/backfilled one static value into every row. `backend/src/db/migrate.js` has an idempotent `UPDATE` for this.
 - Dashboard language toggle is a separate, deliberately simpler mechanism than the bot's bilingual logic: plain `localStorage` + a small pub/sub hook (`frontend/lib/useDashboardLanguage.js`), no React Context, no i18n library. It only affects dashboard UI chrome — never the bot's replies or stored conversation content.
 - Admin login redesign is login-screen-only — no users table, no roles, still one shared `ADMIN_TOKEN` session underneath. A real multi-user system was explicitly rejected; don't add one without being asked again.
-- Bot caps photo-sending to the first 3 listings shown, max 2 photos each, to avoid flooding a WhatsApp chat with dozens of images on one search — adjustable via `MAX_LISTINGS_WITH_PHOTOS`/`MAX_PHOTOS_PER_LISTING` constants in `webhookController.js`.
-- Conversation-flow item 1 ("first message from a new number → welcome message") is implemented as a welcome *prefix* prepended to whatever the bot would say anyway, not a separate welcome-only turn — this answers the lead's first question immediately instead of making them repeat themselves. A stateless approximation was used since there's no reliable "is this genuinely their first-ever message" signal beyond the `leads` table itself.
-- The NLU system prompt is now built dynamically per call (`buildNluSystemPrompt()` in `webhookController.js`), injecting `propertyController.getKnownLocations()`'s live city/neighbourhood list — it's no longer a static string.
+- Bot caps photo-sending to the first 3 listings shown, max 2 photos each, to avoid flooding a WhatsApp chat with dozens of images on one search — adjustable via `MAX_LISTINGS_WITH_PHOTOS`/`MAX_PHOTOS_PER_LISTING` constants in `webhookController.js`. Video is capped further: only the #1-ranked listing, and only if it has one.
+- Conversation-flow item 1 ("first message from a new number → welcome message") is implemented as a welcome *prefix* prepended to whatever the bot would say anyway, not a separate welcome-only turn — this answers the lead's first question immediately instead of making them repeat themselves.
+- The NLU system prompt is built dynamically per call (`buildNluSystemPrompt()` in `webhookController.js`), injecting `propertyController.getKnownLocations()`'s live city/neighbourhood list — this is what lets a message naming only a neighbourhood ("Avédji") resolve correctly instead of being misread as a city.
+- Phone numbers ARE sent to the frontend unmasked (Leads list, Lead Detail, Appointments) — client decision, overriding the original masking rule: the admin needs the real number to actually call/WhatsApp a lead back. `maskPhone()` still exists in `utils/format.js` but nothing calls it anymore.
+- Reply-to-lead from the dashboard is deliberately **not** written to the `conversations` table — the admin's message is appended to the frontend's local state only (so it's visible in the UI immediately) but won't survive a page refresh. This was an explicit simplification, not an oversight.
+- Property delete is blocked (409), not cascaded, when a property has appointments — an admin must not be able to silently destroy booking history via a UI delete button. There is no "force delete" escape hatch by design.
+- Property description translation happens **once, at write time** (on create, or via the backfill script), never per page-view or per bot reply — a translate-on-read approach would add latency to every WhatsApp message and cost money per view for no benefit, since the text never changes after creation.
+- Bot replies are composed by Claude, not hardcoded — see "Conversational bot architecture" below. This reverses the original "all bot strings hardcoded" rule; `BOT_STRINGS` is now the bilingual **fallback**, not the primary path.
+- Language-switch detection uses **two mechanisms deliberately, not one**: a regex fast-path (`detectLanguageSwitchRequest`) for unambiguous phrasings, and an LLM-read `language_request` field for everything else. The regex-only version was tried first and found to be too brittle (missed "now please english", "please english", "english now") — this is documented so nobody "simplifies" it back down to one mechanism.
 
 ### Operational notes for whoever picks this up
-- **This dev environment has a process-lingering quirk:** stopping the backend's background process often doesn't actually kill the underlying `node.exe` — always verify port 5000 is free (force-kill by PID if not) before restarting, or you'll silently talk to a stale process with old env vars.
+- **This dev environment has a process-lingering quirk:** stopping the backend's background process often doesn't actually kill the underlying `node.exe` — always verify port 5000 is free (force-kill by PID if not) before restarting, or you'll silently talk to a stale process with old env vars. This has caused real confusion mid-session (a `curl` test against a "fresh" restart returned stale data because of this).
 - `backend/.env` and `frontend/.env.local` hold real, live credentials (Supabase, Meta, Anthropic, Cloudinary, Resend). Never paste their values into a chat — variable *names* only, if asked.
 
 ---
@@ -87,6 +91,7 @@ After every change, ask yourself each of these before finishing:
 - New DB table or column → add `CREATE TABLE IF NOT EXISTS` or `ALTER TABLE ADD COLUMN IF NOT EXISTS` in `backend/src/db/migrate.js`, then run migrations
 - New dashboard page → add it to the dashboard nav links
 - Any DB change → update every controller and frontend page that reads or writes that table
+- **Any change to the bot's NLU schemas, composers, or booking-flow handlers → run `npm run smoke-bot` before considering it done.** See "Conversational bot architecture" for why this is non-negotiable, not optional polish.
 
 ---
 
@@ -94,9 +99,10 @@ After every change, ask yourself each of these before finishing:
 
 ### No duplicated business logic
 - `sendWhatsAppMessage()` exists once, in `webhookController.js`. Import it everywhere else that needs it. Never copy-paste it.
-- Property search/filter logic exists once, in `propertyController.js`. The bot and the dashboard both call the same function.
+- Property search/filter logic exists once, in `propertyController.js` (`searchProperties` for the dashboard's exact-match contract, `searchPropertiesWithFallback` for the bot's progressive-relaxation contract — both share one `buildQuery()` helper, so there is still only one query builder).
 - Language detection exists once, in a shared utility. Never repeat it.
 - XOF price formatting exists once, in a shared utility. Never repeat it.
+- Property description translation exists once, in `utils/translate.js` (`translateToEnglish` / `translateToFrench`). Never call the Anthropic API directly for this elsewhere.
 
 ### Thin route handlers
 Routes do one thing: receive the request, call a controller, return the response.
@@ -141,7 +147,7 @@ if (exists.rows.length > 0) return res.sendStatus(200);
 Every POST/PATCH endpoint that the dashboard calls must validate required fields before touching the DB. Return 400 with a clear error if validation fails. Never trust frontend input.
 
 ### Server-side auth on every protected route
-Every dashboard API route (leads, properties, appointments) must check the `ADMIN_TOKEN` before responding. The webhook route is the only exception (protected by Meta signature verification instead).
+Every dashboard API route (leads, properties, appointments) must check the `ADMIN_TOKEN` before responding. The webhook route is the only exception (protected by Meta signature verification instead). `POST /api/auth/login` is the only dashboard-facing route also exempt — see Authentication below.
 
 ---
 
@@ -151,7 +157,7 @@ EXCELIA is a single-client deployment. No multi-tenant, no Clerk, no Razorpay, n
 
 Auth works like this:
 - `ADMIN_TOKEN` is an env variable (a long random string) — this is still the ONLY session credential, exactly as originally designed.
-- **Login screen (as of Task 4) is username/password**, not a pasted token: `POST /api/auth/login` checks `{ username, password }` against `ADMIN_USERNAME` + bcrypt `ADMIN_PASSWORD_HASH` (both env vars). This only changes *how the token is obtained* — on success the backend returns the same `ADMIN_TOKEN`, which the frontend stores in a cookie called `excelia_token` exactly as before. Generate the password hash locally with `node backend/scripts/hash-password.js` (masked stdin prompt) — never generate or paste a real password/hash into a Claude chat.
+- Login screen is username/password, not a pasted token: `POST /api/auth/login` checks `{ username, password }` against `ADMIN_USERNAME` + bcrypt `ADMIN_PASSWORD_HASH` (both env vars, **now set** by the client). This only changes *how the token is obtained* — on success the backend returns the same `ADMIN_TOKEN`, which the frontend stores in a cookie called `excelia_token` exactly as before. Generate the password hash locally with `node backend/scripts/hash-password.js` (masked stdin prompt) — never generate or paste a real password/hash into a Claude chat.
 - Every backend API route protected by `authenticateAdmin` middleware:
 
 ```js
@@ -182,27 +188,83 @@ Sending an image:
 { type: 'image', image: { link: cloudinaryUrl, caption: optionalCaption } }
 ```
 
+Sending a video:
+```js
+{ type: 'video', video: { link: cloudinaryUrl, caption: optionalCaption } }
+```
+
 Sending a location pin:
 ```js
 { type: 'location', location: { longitude, latitude, name: neighbourhood, address: city } }
 ```
 
-Each message type is a separate API call. To send a listing: text card first, then one image call per photo, then location call. Never combine them into one API call.
+Each message type is a separate API call. To send a listing: text card first, then one image call per photo, then video (top listing only), then location call. Never combine them into one API call.
 
-**Status:** all four are built in `webhookController.js` — `sendWhatsAppMessage()`, `sendWhatsAppImage()`, `sendWhatsAppVideo()`, `sendWhatsAppLocation()`. `sendListingMedia()` fans them out per search result: photos (capped), then video (top listing only), then the location pin.
+**Status:** all four are built in `webhookController.js` — `sendWhatsAppMessage()`, `sendWhatsAppImage()`, `sendWhatsAppVideo()`, `sendWhatsAppLocation()`. `sendListingMedia()` (renamed from `sendListingPhotos`) fans them out per search result: photos (capped at `MAX_PHOTOS_PER_LISTING`, first `MAX_LISTINGS_WITH_PHOTOS` listings only), then video (top listing only, if it has one), then the location pin (every listing shown, if it has coordinates).
+
+---
+
+## Conversational bot architecture — read this whole section before touching the bot
+
+The bot went through several rounds of real bugs found via live testing, and the architecture is now meaningfully different from a simple "extract filters → search → reply" pipeline. Understand this before changing anything in `webhookController.js`, `utils/replyComposer.js`, or `utils/language.js`.
+
+### The bot has conversation memory
+`getRecentConversation(leadId, 10)` (in `leadController.js`) reads the last 10 turns from `conversations` — the table was always being written to, but nothing read it back until this was added. It's fed into **both** the understanding call and every composer. Without this the bot was stateless per message and visibly broken:
+- `"Thank you"` was classified as a greeting and answered with a full welcome message.
+- `"Yes I want to book an appointment"` was rejected with *"I didn't quite catch that"*, because the selection NLU only accepted a bare number.
+- `"under 400000"` after a search reset the filters instead of refining them (now it carries `city`/`type`/etc. forward and just adds the new constraint).
+- A returning lead saying "Hi" got no greeting at all, just a question — the anti-repetition rule was too blunt (see below) and suppressed greetings entirely instead of just re-introductions.
+
+**Rules to preserve:**
+- **Never call an NLU or composer without passing `history`.** Every one of them takes it.
+- Filters **carry forward** across turns — the NLU is instructed to repeat previously-stated values unless the lead changes their mind.
+- The composer's `historyBlock()` forbids repeating a *sentence*, and forbids re-introducing yourself, but does **not** forbid greeting a returning lead back — that distinction matters (see the "Hi" bug above).
+- When a mid-flow interruption happens (see below), the re-ask for whatever's still needed must be worded differently each time, not repeated verbatim — enforced via a `stillNeeded` hint passed into the relevant composer.
+
+### The booking flow must survive off-script messages — this was the source of the worst bugs
+Both booking-flow NLUs (`extractViewingSelection` for "which listing?", `extractAppointmentDateTime` for "what date/time?") originally offered only a tiny set of decisions (e.g. `datetime_given | decline`, `select | unclear`). **Every off-script message got forced into a bucket, and the wrong bucket was destructive:**
+- "Can you share some photos?" while awaiting a date → classified `decline` → **silently cancelled the booking**.
+- "What is the price again?" / "where is it located" → same, cancelled.
+- "Hello" while awaiting a date → classified `datetime_given` → would have booked a viewing for the literal text "Hello", were it not for a `looksLikeDateText()` guard.
+- "Hello" / "thanks" while choosing a listing → `unclear` → got a booking prompt instead of a normal reply.
+- "Ok, 1 one I liked" → treated as a direct booking request and jumped straight to "what date and time?" — liking a property is not the same as asking to book it.
+
+**The governing rule, now enforced: only an explicit refusal may clear pending booking state.** Both NLUs were widened to a full range of decisions so nothing off-script gets forced into `decline`:
+
+- **Selection state** (`ViewingSelectionSchema.decision`): `select` (booking a specific one, or answering "which one?" with a bare choice), `express_interest` (liking one WITHOUT asking to book — confirms intent before asking for a date, narrows `pendingListingIds` to the one candidate so a following "yes" is unambiguous), `wants_to_book` (clear intent, no listing named), `new_search` (refining rather than choosing — drops booking state and re-searches, carrying filters forward), `request_media` (resends that listing's photos/video/location, stays in selection state), `question` (answered from the DB row, stays in selection state), `greeting` / `closing` (brief acknowledgement, stays in selection state), `decline`.
+- **Datetime state** (`AppointmentDateTimeSchema.decision`): `datetime_given` (only when a real date/time was resolved — guarded by `looksLikeDateText()` so vague text can never become a stored viewing time), `request_media`, `question`, `greeting`, `closing`, `decline` (the only one that actually cancels). `handleViewingDateTimeReply` returns `{ text, mediaListings }` (not a bare string) precisely so a mid-datetime photo request can resend media without losing the booking.
+
+**When adding a new decision type to either schema:** ask "does this need to end the booking?" — if the answer is no (and it almost always is), it must NOT map to `decline`, and the handler must return normally (keeping `pendingAction` set) rather than calling `clearPendingAction`.
+
+### The composer never invents a fact or claims an action happened
+Two hard rules baked into `BASE_PERSONA` in `utils/replyComposer.js`:
+1. **No hallucinated property facts.** The model writes only the conversational wrapper (opening line, explanation of a widened search, follow-up question). Every price, neighbourhood, type, and the agency contact is rendered deterministically by `formatListingsBody()` and appended afterwards — the model is never given the ability to author a number.
+2. **No claimed actions.** `BASE_PERSONA` explicitly forbids saying a viewing is booked/confirmed/registered, or that the team will call back, unless the calling code says so. This was a real bug found in testing: the composer would confidently say *"I'll let the team know... They'll confirm shortly!"* with **zero appointment rows in the database**, apparently improvising from conversation history showing the lead *asking* to book. There is a smoke-test check for exactly this (a lead asking to book with nothing shown must get no false confirmation).
+
+### Language handling
+- `detectLanguage(text)` — the original per-message FR/EN detector. Only trusted for **substantial** messages (>3 words); short replies and mid-booking-flow slot-fills reuse the lead's already-known language instead, since two-word detection is unreliable and was the original cause of language flip-flopping.
+- The lead's `language` column is only ever updated via `COALESCE($1, language)` — passing `null` (e.g. for a media message, which carries no language signal) preserves the existing value instead of overwriting it. This fixed a real bug: sending one photo used to permanently flip an English conversation to French.
+- **Explicit language-switch requests** ("in English please", "now please english", "en français svp") are detected by **two mechanisms, deliberately**: `detectLanguageSwitchRequest()` (regex, in `utils/language.js`) as a zero-cost fast path for unambiguous phrasings, and a `language_request` field on the main understanding call's schema for everything the regex misses (confirmed by testing to miss things like "now please english" and "please english"). Either one winning takes precedence over the pending-flow/short-message rule above and over normal detection. `composeLanguageSwitch()` composes the acknowledgement in the NEW language.
+
+### The two NLU call sites
+1. **Main understanding** (`extractSearchFilters`, despite the name — it now does much more): intent classification (`search`, `off_topic`, `greeting`, `closing`, `booking_intent`, `unclear`) plus `language_request`, `message_language` (replaces a separate `detectLanguage` call, so a message now costs 2 Claude calls instead of 3), and the search filters themselves (with carry-forward). Built dynamically per call via `buildNluSystemPrompt()`, injecting the live city/neighbourhood list.
+2. **Booking-flow NLUs** — `extractViewingSelection` and `extractAppointmentDateTime`, both history-aware, both with the widened decision sets described above.
+
+### `npm run smoke-bot` is mandatory after any bot change
+`backend/scripts/smoke-bot.js` drives the **actual exported handlers** (`handleViewingSelectionReply`, `handleViewingDateTimeReply`, `extractSearchFilters`, etc.) through 18+ independent scenarios against the real DB, using disposable leads that are created and deleted per-scenario. It sends no WhatsApp messages.
+
+**Why this exists, specifically:** an earlier verification pass re-implemented the handler logic inline in a test script instead of calling the real functions. The copy happened to have `history` in scope and passed, while the real `handleViewingSelectionReply` was throwing `ReferenceError: history is not defined` on *every* reply after a listing was shown — in production, every lead who replied to a listing set saw "Sorry, something went wrong." `node -c` cannot catch an undefined variable, and a reimplemented test proves nothing about the real code path. Every scenario asserts the resulting **pending state** (not just reply text), because a silently-cancelled booking is invisible if you only read what the bot said.
 
 ---
 
 ## Bilingual rules
 
-- Detect language from the user's message using Claude.
-- Respond in the same language throughout the conversation.
-- If the user switches language mid-conversation, switch with them immediately.
-- All Claude prompts for NLU must instruct the model to respond in French if the input is French, English if English.
+- Detect language from the user's message using Claude (`detectLanguage`) for substantial messages; reuse the lead's stored language for short/mid-flow messages (see "Conversational bot architecture" above).
+- Respond in the same language throughout the conversation, unless the lead explicitly asks to switch (see above) — then switch immediately and stay switched.
 - **Bot replies are composed by Claude at send time** (`utils/replyComposer.js`), in the lead's language — this REVERSES the original "all bot strings hardcoded" rule, because the templated replies read as robotic to the client. `BOT_STRINGS` in `utils/language.js` is still the bilingual **fallback** used whenever a compose call fails, so a Claude outage degrades to the old behaviour instead of silence. Keep both FR and EN versions of every fallback string.
-- **Hard boundary the composer must never cross:** it writes only the conversational wrapper (opening line, explanation of a widened search, follow-up question). Every property fact — price, neighbourhood, type, agency contact — is rendered deterministically by `formatListingsBody()` and appended afterwards. The model is never allowed to author a number, so it cannot hallucinate a price.
-- The `language` field is stored on the `leads` table and updated every message.
-- This is entirely separate from the **dashboard's own FR/EN language toggle** (`frontend/lib/useDashboardLanguage.js`), which only controls the admin UI's chrome (nav labels, headings, etc.) for whoever is operating the dashboard — it never affects bot replies or stored conversation content, and doesn't touch this section's rules at all.
+- **Hard boundary the composer must never cross:** it writes only the conversational wrapper. Every property fact is rendered deterministically by `formatListingsBody()` and appended afterwards. See "Conversational bot architecture" for the full list of composer rules (no hallucinated facts, no claimed actions, no verbatim-repeated questions).
+- The `language` field is stored on the `leads` table and updated on every message that carries a reliable signal (see above for when it's preserved instead).
+- This is entirely separate from the **dashboard's own FR/EN language toggle** (`frontend/lib/useDashboardLanguage.js`), which only controls the admin UI's chrome (nav labels, headings, etc.) for whoever is operating the dashboard — it never affects bot replies or stored conversation content.
 
 ---
 
@@ -212,6 +274,11 @@ Each message type is a separate API call. To send a listing: text card first, th
 - Every table that will be queried by `organization` or `lead` must have an index on that foreign key column.
 - The `properties` table is the single source of truth for listings. Seed it once with the 13 demo listings. Never hardcode listing data in bot prompts or frontend files.
 - Prices are stored as integers in XOF. Never store as string. Format on display only.
+- **Current columns beyond the original schema, all added via idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`:**
+  - `properties.description_en` — cached one-time English translation (see "Property description translation" below).
+  - `properties.video_url` — single optional walkthrough video URL (not a gallery like `photos`).
+  - `appointments.requested_date` / `appointments.requested_time_of_day` — capture a resolvable date even when the exact clock time couldn't be determined ("demain matin"), without ever inventing a fake time. `requested_datetime` keeps its original strict meaning (exact datetime only).
+  - `leads.notes` — free-text admin notes, separate from `conversations`, never touched by the bot.
 
 ---
 
@@ -224,40 +291,55 @@ The bot extracts these fields from free text using Claude:
 - `price_max` (integer in XOF)
 - `bedrooms` (integer, nullable)
 
-Search query: match on all provided fields. Use `ILIKE` for city/neighbourhood (fuzzy text). Exact match for type and bedrooms. Price: `price <= price_max * 1.1` (10% tolerance).
+Two search functions in `propertyController.js`, sharing one `buildQuery()` helper (never duplicate the query logic):
+- **`searchProperties(filters)`** — the dashboard/exact-match contract. Match on all provided fields (`ILIKE` for city/neighbourhood, exact for type/bedrooms, `price <= price_max * 1.1`). If no results, relax neighbourhood once and return the 3 closest. Kept simple and predictable for any future dashboard search UI.
+- **`searchPropertiesWithFallback(filters)`** — what the **bot** actually uses. Never dead-ends: walks a relaxation cascade (drop neighbourhood → bedrooms → type → city → price, in that "least painful first" order) until something matches, and returns `{ listings, relaxed }` so the reply can honestly say what it had to widen instead of implying an exact match. This exists because the bot used to return zero results and a dead-end reply for entirely reasonable queries.
 
-If no results: return the 3 closest listings (relax neighbourhood constraint, keep type and price).
-If still no results: tell the user in their language, ask one clarifying question.
+The Claude extraction prompt is built dynamically per call (`buildNluSystemPrompt()` in `webhookController.js`), injecting `propertyController.getKnownLocations()`'s live city/neighbourhood pairs, plus explicit market-vocabulary guidance (e.g. "1bhk"/"studio" → `chambre_salon` with 1 bedroom, never `appartement` — a real bug where this mapping was wrong caused a common query to return zero results).
 
-This logic lives in ONE function: `searchProperties(filters)` in `propertyController.js`. Both the bot and any future dashboard search call this same function.
+---
 
-The Claude extraction prompt is built dynamically per call (`buildNluSystemPrompt()` in `webhookController.js`), injecting `propertyController.getKnownLocations()`'s live city/neighbourhood pairs — this is what lets a message naming only a neighbourhood ("Avédji") resolve correctly instead of being misread as a city.
+## Property media (photos, video) and description translation
+
+### Photos
+- Dashboard: single-file upload (`POST /api/properties/:id/photos`) and **multi-file** upload (the frontend loops the same endpoint per file — no new backend endpoint needed). Click-to-enlarge lightbox with gallery navigation (arrow keys, ‹ › buttons, wraps at either end) across a listing's full photo+video set.
+- Bulk: `backend/scripts/bulk-upload-photos.js` (`npm run upload-photos`) — drop files into `backend/photos-to-upload/<property_id>/`, run once. Deterministic Cloudinary public IDs mean re-running is safe (replaces, doesn't duplicate).
+
+### Video
+- One optional video per listing (`video_url`, not an array). Same upload pattern as photos: `POST/DELETE /api/properties/:id/video` (its own multer instance, 50MB limit vs photos' 10MB), and the bulk script also picks up one `.mp4/.mov/.webm` file per property folder.
+- Shown on the dashboard as a small clickable thumbnail (not a full-width inline player) — click opens the lightbox.
+- Sent by the bot only for the **top-ranked** search result, and only if it has one — a video is a much heavier WhatsApp attachment than a photo, so sending one per listing shown (like photos) would be disruptive.
+
+### Description translation
+`description` is authored in French and is the column read everywhere else in the app (bot replies, dashboard FR mode, search). `description_en` is a **cached, one-time** English translation — never generated at read time.
+- `utils/translate.js` exports `translateToEnglish()` and `translateToFrench()` (same Claude model, shared glossary so translated copy stays consistent with `PROPERTY_TYPE_LABELS`). Both never throw — a failed translation just leaves the field null (EN mode falls back to French) rather than breaking anything.
+- **On create**, the Add Property form has a FR/EN toggle for which language the admin actually typed. The backend translates whichever side wasn't typed and stores both immediately — so a new listing works correctly in both languages right away, not just after a manual backfill run.
+- **Backfill**: `backend/scripts/backfill-translations.js` (`npm run backfill-translations`) — re-runnable, only touches properties where `description_en IS NULL` and appointments where `requested_date IS NULL` (it does double duty: also re-resolves old appointments' vague dates using their own `created_at` as the reference "now", since "demain" means nothing without the date it was said relative to).
 
 ---
 
 ## Conversation flow
 
 1. First message from a new number → welcome message (FR or EN based on detected language) → ask what they are looking for. *(Implemented as a welcome prefix prepended to whatever the bot's actual reply would be — see "Key decisions" above — so a first message that already states a full search still gets answered immediately, not just greeted.)*
-2. User describes requirement (free text) → Claude extracts fields → search → return matching listings.
-3. Each listing sent as: text card (type, neighbourhood, price, agency contact) + photos + location pin. *(All built — see `sendListingMedia()`.)*
-4. After listings: ask "Would you like to book a viewing?" (in their language).
-5. If yes → collect preferred date/time → save as appointment → confirm.
-6. Off-topic message → redirect in their language: "Je suis spécialisé dans la recherche immobilière au Togo."
-7. Every inbound message and every bot reply is saved to the `conversations` table.
+2. User describes requirement (free text) → Claude extracts fields (with conversation memory — see "Conversational bot architecture") → search → return matching listings.
+3. Each listing sent as: text card (type, neighbourhood, price, agency contact) + photos + video (top listing only) + location pin. *(All built — see `sendListingMedia()`.)*
+4. After listings: ask "Would you like to book a viewing?" (in their language, composed by Claude with the deterministic listing cards appended).
+5. If yes → collect preferred date/time → save as appointment → confirm. This flow now survives interruptions (photo requests, questions, greetings) without losing the booking — see "Conversational bot architecture" for the full decision-handling rules.
+6. Off-topic message → redirected in their language by the composer (fallback: "Je suis spécialisé dans la recherche immobilière au Togo.").
+7. Every inbound message and every bot reply is saved to the `conversations` table — this is also the bot's short-term memory (see above), so never bypass `saveConversationMessage()`.
 
-### The bot has conversation memory — keep it that way
-`getRecentConversation(leadId, 10)` feeds the last 10 turns into **both** the understanding call and every composer. This is not optional polish; without it the bot was stateless per message and visibly broken:
-- `"Thank you"` was classified as a greeting and answered with a full welcome message.
-- `"Yes I want to book an appointment"` was rejected with *"I didn't quite catch that"*, because the selection NLU only accepted a bare number.
-- `"under 400000"` after a search reset the filters instead of refining them.
+**Do not modify the booking flow, NLU schemas, or composers without reading "Conversational bot architecture" above in full and running `npm run smoke-bot` afterwards.**
 
-Rules to preserve when touching this:
-- **Run `npm run smoke-bot` after ANY change to the bot.** It drives the real exported handlers through a full conversation against the DB (disposable lead, cleaned up after) and sends no WhatsApp messages. It exists because a previous verification pass re-implemented the handler logic inline instead of calling it — the copy had `history` in scope and passed, while the real `handleViewingSelectionReply` threw `ReferenceError: history is not defined` on every reply after a listing set, and leads just saw "Sorry, something went wrong." Testing a reimplementation proves nothing; `node -c` cannot catch undefined variables.
-- The composer must never claim an action happened. `BASE_PERSONA` explicitly forbids saying a viewing is booked/confirmed/registered, or that the team will call back, unless the prompt says so — the history shows leads *asking* to book, and the model will otherwise confidently confirm bookings that were never written to the DB. There is a smoke-test check for exactly this.
-- **Never call an NLU or composer without passing `history`.** Every one of them takes it.
-- Intents that exist specifically to prevent the above: `closing` (thanks/bye — must never be answered with a greeting), `booking_intent` (wants to book, hasn't named a listing), and `new_search` on the selection path (a refinement after results, which must drop the booking state and re-search rather than trapping the lead in "which number?").
-- Filters **carry forward** across turns — the NLU is instructed to repeat previously-stated values unless the lead changes their mind.
-- The composer prompt forbids repeating a greeting or a question already sent in the same conversation.
+---
+
+## Dashboard admin features (built after Step 9)
+
+- **Properties**: search bar, type-tab filter, Add (with FR/EN description toggle), Delete (in-app confirm modal, blocked with 409 if appointments exist), multi-photo upload, single video upload, media lightbox with gallery navigation.
+- **Leads**: search bar, status pill-filter (existing), **inline status `<select>` per row** (new — previously only editable from Lead Detail), phone numbers shown in full.
+- **Lead Detail**: status editor, conversation thread (polls every 5s while visible), reply-to-lead textarea (sends via WhatsApp, not persisted to `conversations`), notes textarea (auto-saves, persisted, separate system from the conversation), appointments panel with translated status.
+- **Appointments**: search bar, status pill-filter, **status `<select>` per row** (new — previously read-only), Togo-timezone-correct date/time display, graceful display for vague requested times (falls back through: exact datetime → date + part-of-day → raw text).
+
+All of the above follow the existing patterns already documented in "Code rules" (thin routes, `authenticateAdmin` on every route, validation at the boundary, no `SELECT *`).
 
 ---
 
@@ -275,7 +357,11 @@ Rules to preserve when touching this:
 - Never forget to add a new route to `backend/index.js`.
 - Never forget to export a new function in `module.exports`.
 - Never let the dashboard work without backend auth, even for the demo.
-- Phone numbers ARE sent to the frontend unmasked (Leads list, Lead Detail, Appointments list) — client decision, overriding the original masking rule: the admin needs the real number to actually call/WhatsApp a lead back. `maskPhone()` still exists in `utils/format.js` but nothing calls it anymore; trivial to reinstate if this changes.
+- Phone numbers ARE sent to the frontend unmasked (Leads list, Lead Detail, Appointments list) — client decision, overriding the original masking rule.
+- **Never let a booking-flow NLU decision map to `decline` unless it is an actual, explicit refusal.** This was the root cause of the worst bug found in this project: questions and photo requests mid-booking were silently cancelling real leads' viewing appointments.
+- **Never let the composer state or imply an action happened** (booked/confirmed/registered/"team will call") unless the calling code explicitly told it so — the model will otherwise confidently confirm things that were never written to the database.
+- **Never translate a property description at read time.** Always write-time-only, cached in `description_en`.
+- **Never skip `npm run smoke-bot` after touching the bot.** A syntax-valid, logically-plausible change to the booking flow has twice caused a silent production regression in this project that only a real end-to-end run against the actual handlers caught.
 
 ---
 
@@ -297,7 +383,9 @@ ADMIN_PASSWORD_HASH=
 RESEND_API_KEY=
 ```
 
-`ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` are for the login screen (see Authentication above). Generate the hash with `node backend/scripts/hash-password.js` — never by hand, never in chat. Currently blank in the live `.env` — login won't work until the human user sets them.
+`ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` are for the login screen (see Authentication above). Generate the hash with `node backend/scripts/hash-password.js` — never by hand, never in chat. **Now set** by the client; login works. `WHATSAPP_TOKEN` was expired earlier in the project and has since been refreshed by the client — verified working via a live API check.
+
+No new environment variables were introduced by any of the work described in "Current build status" above — every new feature reuses `ANTHROPIC_API_KEY` (translation, NLU, composer) and the existing Cloudinary/WhatsApp credentials.
 
 Frontend `.env.local` (never commit):
 ```
@@ -322,9 +410,11 @@ excelia/
 │   ├── .env.example                   ← Commit with placeholder values
 │   ├── package.json
 │   ├── scripts/
-│   │   ├── bulk-upload-photos.js      ← one-time/repeatable: uploads backend/photos-to-upload/<id>/ to Cloudinary, updates DB
-│   │   └── hash-password.js           ← standalone CLI: masked password prompt, prints its bcrypt hash
-│   ├── photos-to-upload/              ← gitignored, local-only source images for the bulk script
+│   │   ├── bulk-upload-photos.js      ← uploads backend/photos-to-upload/<id>/ photos AND one video per folder to Cloudinary, updates DB
+│   │   ├── hash-password.js           ← standalone CLI: masked password prompt, prints its bcrypt hash
+│   │   ├── backfill-translations.js   ← re-runnable: fills properties.description_en + resolves old appointments' vague requested dates
+│   │   └── smoke-bot.js               ← REQUIRED after any bot change: 18+ scenarios against the real handlers, disposable leads, no WhatsApp sends (npm run smoke-bot)
+│   ├── photos-to-upload/              ← gitignored, local-only source images/video for the bulk script
 │   └── src/
 │       ├── db/
 │       │   ├── index.js               ← PostgreSQL pool — has pool.on('error', ...) (required, see Mistakes)
@@ -333,21 +423,23 @@ excelia/
 │       ├── middleware/
 │       │   └── auth.js                ← authenticateAdmin middleware
 │       ├── controllers/
-│       │   ├── webhookController.js   ← WhatsApp inbound + ALL bot logic (NLU, booking flow, sendWhatsAppMessage/Image)
-│       │   ├── propertyController.js  ← searchProperties(), getKnownLocations(), photo upload/delete — used by bot AND dashboard
-│       │   ├── leadController.js      ← lead CRUD + booking pending-flow state + status pipeline
-│       │   ├── appointmentController.js ← booking logic
+│       │   ├── webhookController.js   ← WhatsApp inbound + ALL bot logic: NLU (extractSearchFilters/extractViewingSelection/extractAppointmentDateTime), booking-flow handlers, sendWhatsAppMessage/Image/Video/Location, sendListingMedia
+│       │   ├── propertyController.js  ← searchProperties()/searchPropertiesWithFallback(), getKnownLocations(), create/remove, photo+video upload/delete — used by bot AND dashboard
+│       │   ├── leadController.js      ← lead CRUD, getRecentConversation() (bot memory), booking pending-flow state, status pipeline, updateNotes, sendReply
+│       │   ├── appointmentController.js ← booking logic, updateStatus
 │       │   └── authController.js      ← login endpoint (username/password → ADMIN_TOKEN)
 │       ├── routes/
 │       │   ├── webhook.js
-│       │   ├── properties.js          ← includes photo upload/delete endpoints
-│       │   ├── leads.js               ← includes the status PATCH endpoint
-│       │   ├── appointments.js
+│       │   ├── properties.js          ← includes create/delete, photo upload/delete, video upload/delete endpoints
+│       │   ├── leads.js               ← includes status PATCH, notes PATCH, reply POST
+│       │   ├── appointments.js        ← includes status PATCH
 │       │   └── auth.js
 │       └── utils/
 │           ├── cloudinary.js          ← shared Cloudinary config — bulk script + dashboard uploads both import this
-│           ├── language.js            ← detectLanguage(), BOT_STRINGS (FR + EN)
-│           └── format.js              ← formatXOF(), maskPhone()
+│           ├── language.js            ← detectLanguage(), detectLanguageSwitchRequest() (regex fast-path), BOT_STRINGS (FR + EN fallbacks)
+│           ├── translate.js           ← translateToEnglish()/translateToFrench() — write-time-only, cached, never called per page-view
+│           ├── replyComposer.js       ← Claude-composed bot replies (see "Conversational bot architecture") — wrapper text only, never facts or claimed actions
+│           └── format.js              ← formatXOF(), maskPhone() (unused now, phone is unmasked)
 │
 └── frontend/
     ├── .env.local
@@ -356,30 +448,34 @@ excelia/
     │   └── LanguageToggle.js          ← shared FR/EN pill, used by the dashboard nav AND the login page
     ├── lib/
     │   ├── api.js                     ← Axios instance with token from cookie
-    │   ├── statusConfig.js            ← lead pipeline stages, bilingual labels
+    │   ├── statusConfig.js            ← lead pipeline stages AND appointment statuses, bilingual labels
     │   ├── dashboardStrings.js        ← FR/EN dictionary for dashboard UI chrome
     │   └── useDashboardLanguage.js    ← localStorage-backed dashboard language hook
     └── app/
         ├── layout.js
         ├── page.js                    ← redirects to /login or /dashboard
         ├── globals.css
-        ├── login/page.js              ← username/password login
+        ├── login/page.js              ← username/password login, client logo
         └── dashboard/
             ├── layout.js              ← nav, language toggle, auth guard
-            ├── page.js                ← Leads overview
-            ├── leads/[id]/page.js     ← Lead detail + conversation + status editor
-            ├── properties/page.js     ← 13 listings + photo upload/delete UI
-            └── appointments/page.js
+            ├── page.js                ← Leads overview: search, status filter, inline status dropdown per row
+            ├── leads/[id]/page.js     ← Lead detail: status editor, live-polled conversation, reply-to-lead, notes (autosave)
+            ├── properties/page.js     ← listings: search, type filter, Add/Delete, multi-photo + video upload, media lightbox
+            └── appointments/page.js   ← search, status filter, status dropdown per row, timezone-correct dates
 ```
 
 Note: there is no `dashboardController.js` — never needed. Every dashboard read/write lives directly in the controller that owns that resource (`leadController.js`, `propertyController.js`, `appointmentController.js`).
+
+No new frontend page files were added by any of the dashboard work above — every feature was added to an existing page.
 
 ---
 
 ## How to work
 
 1. Read this entire file before starting any task — start with "Current build status" above so you don't re-do finished work or miss what's actually still pending.
-2. When adding a feature, identify ALL files it touches before writing any code.
-3. After writing, check the ripple-effect list at the top.
-4. One feature at a time. Do not start the next until the current one is complete.
-5. If the saas-mvp repo has working code that covers a need, read it first before writing from scratch.
+2. If the task touches the bot (`webhookController.js`, `utils/replyComposer.js`, `utils/language.js`, `propertyController.js`'s search functions), read "Conversational bot architecture" in full before writing any code — this codebase has already broken in the same class of way (a booking-flow NLU decision silently destroying state) more than once.
+3. When adding a feature, identify ALL files it touches before writing any code.
+4. After writing, check the ripple-effect list at the top.
+5. **If you touched the bot, run `npm run smoke-bot` before considering the task done.** A syntax check is not enough — this exact class of bug (an undefined variable, or a booking flow that quietly cancels itself) has passed `node -c` and even a reimplemented test harness before.
+6. One feature at a time. Do not start the next until the current one is complete.
+7. If the saas-mvp repo has working code that covers a need, read it first before writing from scratch.
