@@ -118,6 +118,14 @@ const BOT_STRINGS = {
         fr: "C'est noté ! Votre demande de visite a été enregistrée pour :",
         en: "Got it! Your viewing request has been saved for:",
     },
+    media_resent: {
+        fr: "Bien sûr, je vous renvoie les photos de ce bien.",
+        en: "Of course — sending you the photos for that property now.",
+    },
+    media_unavailable: {
+        fr: "Je n'ai pas encore de photos pour ce bien, mais l'agence peut vous en dire plus au +228 91062626.",
+        en: "I don't have photos for that property yet, but the office can tell you more on +228 91062626.",
+    },
     closing: {
         fr: "Avec plaisir ! N'hésitez pas à m'écrire si vous avez besoin d'autre chose.",
         en: "You're welcome! Feel free to message me any time if you need anything else.",

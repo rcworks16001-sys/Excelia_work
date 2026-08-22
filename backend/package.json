@@ -10,6 +10,7 @@
     "upload-photos": "node scripts/bulk-upload-photos.js",
     "hash-password": "node scripts/hash-password.js",
     "backfill-translations": "node scripts/backfill-translations.js",
+    "smoke-bot": "node scripts/smoke-bot.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

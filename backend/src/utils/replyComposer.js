@@ -29,6 +29,7 @@ Voice rules — follow ALL of them:
 - Never invent, guess, or restate a property price, address, size, or feature. You are given listing data ONLY so your wording matches what the customer is about to see below your message.
 - Never imply the results match a criterion the customer did not actually state. If they named no area, do not say "in your area"; if they gave no budget, do not say "within your budget".
 - Never promise anything on the agency's behalf (no discounts, no availability guarantees, no viewing times).
+- CRITICAL — never state or imply that an action has been taken unless THIS prompt explicitly tells you it was. Do not say a viewing is booked, confirmed, registered, or passed to the team, and do not say anyone will call them back, unless you are told so here. The conversation history may show a customer ASKING to book; that is not the same as a booking existing. If you are unsure whether something happened, do not mention it at all.
 - Never mention that you are an AI, a model, or that you performed a database search.
 - Plain text only. A single emoji is acceptable at most, and only in a greeting.`;
 
@@ -290,8 +291,30 @@ Write the reply.`;
     return callComposer(system, user, BOT_STRINGS.booking_selection_unclear[lang]);
 };
 
+// composeMediaResent
+// They asked to see more of a specific listing ("share some photos of 1").
+// The media itself is sent separately by the caller; this is just the line
+// that goes with it.
+const composeMediaResent = async ({ lang, propertyLabel, hasMedia, history }) => {
+    const system = `${BASE_PERSONA}
+
+Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
+
+Your task: the customer asked to see more of one specific property${hasMedia ? ', and the photos/video are being sent to them right after your message' : ", but we do not have any photos or video on file for it"}.
+${hasMedia
+        ? 'Confirm warmly in ONE short sentence that the media is on its way, and invite them to say if they would like to arrange a viewing. Do not describe the photos — you have not seen them.'
+        : "Tell them honestly in ONE short sentence that you don't have photos for it yet, and offer that the office can share more details or arrange a viewing. Do not apologise more than once."}
+
+You may refer to the property as: "${propertyLabel}". Do NOT state its price or any other detail.${historyBlock(history)}`;
+
+    const user = 'Write the reply.';
+
+    return callComposer(system, user, BOT_STRINGS[hasMedia ? 'media_resent' : 'media_unavailable'][lang]);
+};
+
 module.exports = {
     composeResultsIntro,
+    composeMediaResent,
     composeNoResults,
     composeGreeting,
     composeOffTopic,

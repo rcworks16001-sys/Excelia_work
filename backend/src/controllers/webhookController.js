@@ -19,6 +19,7 @@ const {
     composeBookingConfirmed,
     composeBookingDeclined,
     composeSelectionUnclear,
+    composeMediaResent,
 } = require('../utils/replyComposer');
 const {
     getOrCreateLead,
@@ -382,7 +383,7 @@ const ViewingSelectionSchema = z.object({
     // ("actually under 400000", "show me apartments instead") was being read
     // as an attempt to pick a listing. Detecting it lets the flow drop back
     // into search instead of trapping them in the booking prompt.
-    decision: z.enum(['decline', 'select', 'wants_to_book', 'new_search', 'unclear']),
+    decision: z.enum(['decline', 'select', 'wants_to_book', 'new_search', 'request_media', 'unclear']),
     selected_number: z.number().int().nullable(),
 });
 
@@ -400,6 +401,7 @@ const extractViewingSelection = async (text, listingCount, history = []) => {
   * "select" — they clearly indicate exactly ONE property, by number or by an unambiguous description matching one listing's position ("the second one", "the villa in Bè").
   * "wants_to_book" — they clearly want to book but have NOT said which property ("yes", "yes I want to book an appointment", "oui je veux visiter"). An enthusiastic yes is NOT unclear.
   * "new_search" — they are changing or refining what they're looking for rather than picking from the list ("actually under 400000", "do you have apartments instead?", "what about Bè?", "something cheaper"). This is a NEW requirement, not a selection.
+  * "request_media" — they are asking to SEE more of a specific listing rather than to book it ("can you share some photos of 1", "more pictures of the second one", "send me the video", "où se trouve le 2 ?"). Set selected_number to the listing they mean. Wanting to look at photos is NOT the same as choosing to book a viewing.
   * "decline" — no / not interested / not now.
   * "unclear" — only if none of the above fit (e.g. they asked something unrelated instead of answering).
 - selected_number: the 1-based number they selected, only when decision is "select" — must be between 1 and ${listingCount}. null otherwise.`,
@@ -438,7 +440,7 @@ const extractAppointmentDateTime = async (text, referenceNow = null) => {
             max_tokens: 200,
             temperature: 0,
             system: `The current date/time is ${now} (UTC). The user was just asked for their preferred date and time for a property viewing in Togo, and is replying in French or English, possibly with a relative expression ("demain", "next Friday at 3pm", "vendredi prochain").
-- decision: "decline" only if they are now saying they've changed their mind and no longer want to book. Otherwise "datetime_given".
+- decision: "decline" ONLY if they explicitly say they no longer want to book ("non merci", "actually forget it", "not anymore"). Anything else is "datetime_given" — including vague, partial or confusing replies like a bare number, "asap", or "whenever". A reply you cannot parse is NOT a decline; leave the date fields null and keep decision "datetime_given".
 - iso_datetime: resolve their reply to an absolute ISO 8601 datetime (assume Togo's timezone, UTC+0) ONLY if you can confidently determine both a date AND a specific clock time. If the time is vague ("matin", "morning", "dans la journée"), return null here — use resolved_date + time_of_day instead. Never invent a clock time.
 - resolved_date: the calendar date they mean, as "YYYY-MM-DD" (Togo time, UTC+0), whenever the DATE is determinable — including relative expressions ("demain" -> the day after the current date above, "vendredi" -> the next upcoming Friday). Fill this in even when you also filled iso_datetime, and even when the time of day is unknown. null only if no date can be determined at all.
 - time_of_day: "morning", "afternoon", or "evening" if they indicated a coarse part of the day ("matin", "après-midi", "le soir"). If they gave a specific clock time instead, still classify it (e.g. 15h -> "afternoon"). null if there is no time indication whatsoever.`,
@@ -478,18 +480,42 @@ const formatListingsSummary = (listings, lang) =>
     `${BOT_STRINGS.results_intro[lang]}\n\n${formatListingsBody(listings, lang)}`;
 
 // ── Booking flow, step 1: which listing (or decline)? ──
-const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingIds }) => {
+// Returns { text, mediaListings } rather than a bare string, because this is
+// the one path where the lead can ask to SEE more of a listing — and the
+// media send has to happen in handleMessage (which owns the WhatsApp
+// connection). mediaListings is null unless media was requested.
+// handleViewingDateTimeReply still returns a plain string; nothing in the
+// date/time step can request media.
+const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingIds, history = [] }) => {
     if (!pendingListingIds || pendingListingIds.length === 0) {
         // Defensive — shouldn't happen, but never get the lead stuck.
         await clearPendingAction(leadId);
-        return BOT_STRINGS.welcome_clarify[lang];
+        return { text: BOT_STRINGS.welcome_clarify[lang], mediaListings: null };
     }
 
     const selection = await extractViewingSelection(text, pendingListingIds.length, history);
 
+    // They want to see more of a specific listing, not book it. Keep the
+    // pending selection state — they haven't chosen anything yet.
+    if (
+        selection.decision === 'request_media' &&
+        Number.isInteger(selection.selected_number) &&
+        selection.selected_number >= 1 &&
+        selection.selected_number <= pendingListingIds.length
+    ) {
+        const propertyId = pendingListingIds[selection.selected_number - 1];
+        const property = await getPropertyById(propertyId);
+        if (property) {
+            const propertyLabel = `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`;
+            const hasMedia = (property.photos && property.photos.length > 0) || property.video_url;
+            const text = await composeMediaResent({ lang, propertyLabel, hasMedia, history });
+            return { text, mediaListings: hasMedia ? [property] : null };
+        }
+    }
+
     if (selection.decision === 'decline') {
         await clearPendingAction(leadId);
-        return composeBookingDeclined({ lang, history });
+        return { text: await composeBookingDeclined({ lang, history }), mediaListings: null };
     }
 
     if (
@@ -504,13 +530,13 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
         const propertyLabel = property
             ? `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`
             : '';
-        return composeAskDatetime({ lang, propertyLabel, history });
+        return { text: await composeAskDatetime({ lang, propertyLabel, history }), mediaListings: null };
     }
 
     // They clearly want to book but didn't say which one — that's a normal
     // answer, not a misunderstanding. Keep the pending state and ask which.
     if (selection.decision === 'wants_to_book') {
-        return composeBookingPrompt({ lang, listingCount: pendingListingIds.length, history });
+        return { text: await composeBookingPrompt({ lang, listingCount: pendingListingIds.length, history }), mediaListings: null };
     }
 
     // Not a selection at all — they're refining what they want. Drop the
@@ -522,7 +548,10 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
     }
 
     // Genuinely couldn't tell which listing they meant.
-    return composeSelectionUnclear({ lang, userMessage: text, listingCount: pendingListingIds.length, history });
+    return {
+        text: await composeSelectionUnclear({ lang, userMessage: text, listingCount: pendingListingIds.length, history }),
+        mediaListings: null,
+    };
 };
 
 // ── Booking flow, step 2: their preferred date/time ──
@@ -664,7 +693,7 @@ const handleMessage = async (req, res) => {
         let listingsShown = null; // set only when search results were just sent, for the media follow-up below
         let isGreetingReply = false; // a greeting is already a full welcome — never prefix it with another one
         if (lead.pendingAction === 'awaiting_viewing_selection') {
-            replyBody = await handleViewingSelectionReply({
+            const selectionResult = await handleViewingSelectionReply({
                 leadId,
                 text,
                 lang,
@@ -673,8 +702,13 @@ const handleMessage = async (req, res) => {
             });
             // null = "this wasn't a selection, they're searching again".
             // Load the understanding we skipped and fall through to search.
-            if (replyBody === null) {
+            if (selectionResult === null) {
                 understanding = await extractSearchFilters(text, history);
+            } else {
+                replyBody = selectionResult.text;
+                // They asked to see more of a listing — resend its media after
+                // the text reply, same ordering as a fresh search result.
+                if (selectionResult.mediaListings) listingsShown = selectionResult.mediaListings;
             }
         }
 
@@ -792,6 +826,8 @@ module.exports = {
     sendWhatsAppVideo,
     sendWhatsAppLocation,
     handleMessage,
+    handleViewingSelectionReply,
+    handleViewingDateTimeReply,
     extractSearchFilters,
     hasAnyFilter,
     formatListingsBody,
