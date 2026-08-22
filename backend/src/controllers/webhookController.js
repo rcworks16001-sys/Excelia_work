@@ -21,6 +21,7 @@ const {
     composeUnsupportedMedia,
     composeHandoff,
     composeAskRejectionReason,
+    composeComparison,
     composeLanguageSwitch,
     composeClosing,
     composeBookingPrompt,
@@ -488,8 +489,11 @@ const ViewingSelectionSchema = z.object({
     // 'decline', which ends the whole booking. "I don't like the first one" is
     // a refinement signal, not a goodbye; treating it as one used to end the
     // conversation on someone who was still shopping.
-    decision: z.enum(['decline', 'select', 'express_interest', 'reject_property', 'wants_to_book', 'new_search', 'request_media', 'question', 'greeting', 'closing', 'wants_human', 'unclear']),
+    decision: z.enum(['decline', 'select', 'express_interest', 'reject_property', 'compare', 'wants_to_book', 'new_search', 'request_media', 'question', 'greeting', 'closing', 'wants_human', 'unclear']),
     selected_number: z.number().int().nullable(),
+    // For 'compare': which listings they want set side by side. Two or three;
+    // beyond that a WhatsApp message stops being readable.
+    compare_numbers: z.array(z.number().int()).nullable(),
     handoff_reason: z.enum(['asked_for_agent', 'negotiation', 'complaint', 'legal_or_financial']).nullable(),
     // Why they turned it down, when they say. null means they just said "no" —
     // which is the cue to ask.
@@ -497,7 +501,7 @@ const ViewingSelectionSchema = z.object({
 });
 
 const extractViewingSelection = async (text, listingCount, history = []) => {
-    const fallback = { decision: 'unclear', selected_number: null, handoff_reason: null, rejection_reason: null };
+    const fallback = { decision: 'unclear', selected_number: null, compare_numbers: null, handoff_reason: null, rejection_reason: null };
     if (!text || !text.trim()) return fallback;
 
     try {
@@ -513,6 +517,7 @@ const extractViewingSelection = async (text, listingCount, history = []) => {
   * "new_search" — they are changing or refining what they're looking for rather than picking from the list ("actually under 400000", "do you have apartments instead?", "what about Bè?", "something cheaper"). This is a NEW requirement, not a selection.
   * "request_media" — they are asking to SEE more of a specific listing rather than to book it ("can you share some photos of 1", "more pictures of the second one", "send me the video", "où se trouve le 2 ?"). Set selected_number to the listing they mean. Wanting to look at photos is NOT the same as choosing to book a viewing.
   * "question" — they are ASKING something about a listing rather than choosing ("what is the price of 2?", "how many bedrooms?", "where is it?"). Set selected_number if they name one.
+  * "compare" — they want two or three listings set side by side ("compare 1 and 3", "what's the difference between the first two?", "quelle est la différence entre 1 et 2 ?"). Set compare_numbers to the listing numbers they named. If they say "compare them" without naming any, set compare_numbers to all of them.
   * "reject_property" — they DISLIKE one of the listings shown, without ending the conversation ("I don't like the first one", "not the second one", "le 1 ne me plaît pas", "the villa is too expensive"). Set selected_number. Set rejection_reason if they say WHY ("too expensive" -> "price", "too far"/"wrong area" -> "location", "too small"/"not enough rooms" -> "size", "I wanted an apartment" -> "type"); leave rejection_reason null if they just said no. This is NOT a decline — they are still looking.
   * "wants_human" — they need a person: asking to speak to an agent, trying to NEGOTIATE the price or terms ("can you lower the price?", "c'est négociable ?", "any discount?"), complaining, or asking a legal/financial/contractual question. Set handoff_reason. Note this is different from "question" — asking what the price IS is a question; asking for it to be CHANGED is a negotiation only a person can handle.
   * "greeting" — a greeting or pleasantry ("hello", "hi", "bonjour", "ca va ?"). NOT a selection and NOT a decline.
@@ -625,6 +630,61 @@ const formatListingsBody = (listings, lang) => {
     return lines.join('\n\n');
 };
 
+// ── formatComparison(properties, lang) ──
+// Two or three listings set attribute by attribute, so the differences are
+// readable at a glance instead of buried in three separate cards.
+//
+// Every figure here comes straight from the DB row — same deterministic-facts
+// boundary as the listing cards. The model contributes only the one-line
+// "which would suit you" sentence appended afterwards, and only ever in terms
+// of priorities the lead actually stated.
+//
+// A real table doesn't survive WhatsApp (no monospace, narrow screens), so
+// this groups by attribute rather than drawing columns.
+const formatComparison = (properties, lang) => {
+    const L = lang === 'fr'
+        ? { price: 'Prix', type: 'Type', area: 'Quartier', beds: 'Chambres', deal: 'Transaction', rent: 'À louer', sale: 'À vendre', none: '—' }
+        : { price: 'Price', type: 'Type', area: 'Area', beds: 'Bedrooms', deal: 'Transaction', rent: 'For rent', sale: 'For sale', none: '—' };
+
+    const header = properties
+        .map((p, i) => `${i + 1}. ${PROPERTY_TYPE_LABELS[p.type]?.[lang] ?? p.type} — ${p.neighbourhood}`)
+        .join('\n');
+
+    const row = (label, valueOf) =>
+        `${label}: ${properties.map((p, i) => `(${i + 1}) ${valueOf(p)}`).join('   ')}`;
+
+    const lines = [
+        row(L.price, (p) => formatXOF(p.price)),
+        row(L.area, (p) => `${p.neighbourhood}, ${p.city}`),
+        row(L.beds, (p) => (p.bedrooms != null ? String(p.bedrooms) : L.none)),
+        row(L.deal, (p) => (p.transaction === 'sale' ? L.sale : L.rent)),
+    ];
+
+    return `${header}\n\n${lines.join('\n')}`;
+};
+
+// ── comparisonFactSheet(properties, lang) ──
+// The same listings as formatComparison, PLUS each one's description, given to
+// the composer so its steer can talk about what actually distinguishes them
+// ("a pool", "near the sea") instead of only restating the numbers.
+//
+// This exists because without it the model reached into the conversation
+// history for those details — they were real (the descriptions had already
+// been sent as part of the listing cards) but it was re-deriving which feature
+// belonged to which property, which is precisely how a confident
+// misattribution happens. Supplying them explicitly and labelled makes the
+// prompt's "nothing beyond what is listed here" rule actually enforceable.
+//
+// NOT sent to the customer — the visible table stays compact.
+const comparisonFactSheet = (properties, lang) => properties
+    .map((p, i) => {
+        const description = lang === 'en' ? (p.description_en || p.description) : p.description;
+        return `(${i + 1}) ${PROPERTY_TYPE_LABELS[p.type]?.[lang] ?? p.type}, ${p.neighbourhood}, ${formatXOF(p.price)}`
+            + `${p.bedrooms != null ? `, ${p.bedrooms} bedroom(s)` : ''}`
+            + `${description ? ` — ${description}` : ''}`;
+    })
+    .join('\n');
+
 // Cards prefixed with the hardcoded intro — the fallback shape, used when the
 // conversational composer is unavailable.
 const formatListingsSummary = (listings, lang) =>
@@ -699,6 +759,54 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
             }),
             mediaListings: null,
         };
+    }
+
+    // "Compare 1 and 3". Stays in the selection state — comparing is how they
+    // decide, not a decision. The table is rendered from the DB rows; only the
+    // one-line steer underneath is composed.
+    if (selection.decision === 'compare') {
+        const wanted = (selection.compare_numbers && selection.compare_numbers.length >= 2)
+            ? selection.compare_numbers
+            // "compare them" with nothing named — use everything on screen.
+            : pendingListingIds.map((_, i) => i + 1);
+
+        const ids = wanted
+            .filter((n) => Number.isInteger(n) && n >= 1 && n <= pendingListingIds.length)
+            .slice(0, 3) // beyond three, a WhatsApp message stops being readable
+            .map((n) => pendingListingIds[n - 1]);
+
+        const properties = (await Promise.all(ids.map((id) => getPropertyById(id)))).filter(Boolean);
+
+        // Fewer than two survived (a listing was deleted mid-conversation) —
+        // there is nothing to compare, so fall through to the normal handling
+        // rather than showing a one-column "comparison".
+        if (properties.length >= 2) {
+            const profile = await getProfile(leadId);
+            // Only priorities they ACTUALLY stated. Passing an empty list makes
+            // the composer ask what matters instead of inventing a preference.
+            const stated = [
+                profile?.budget_max || profile?.budget_stretch_max ? (lang === 'fr' ? 'leur budget' : 'their budget') : null,
+                profile?.neighbourhood ? (lang === 'fr' ? `le quartier ${profile.neighbourhood}` : `the ${profile.neighbourhood} area`) : null,
+                profile?.bedrooms_min ? (lang === 'fr' ? 'le nombre de chambres' : 'the number of bedrooms') : null,
+                profile?.purpose === 'investment' ? (lang === 'fr' ? "l'investissement" : 'investment potential') : null,
+            ].filter(Boolean).join(', ');
+
+            const table = formatComparison(properties, lang);
+            const steer = await composeComparison({
+                lang,
+                userMessage: text,
+                // The fact sheet (with descriptions), not the visible table —
+                // so the steer can name what actually differentiates them
+                // without reconstructing details from the transcript.
+                summary: comparisonFactSheet(properties, lang),
+                statedPriorities: stated || null,
+                history,
+            });
+            await recordEvent(leadId, EVENT_TYPES.PROPERTIES_COMPARED, {
+                metadata: { propertyIds: properties.map((p) => p.id) },
+            });
+            return { text: `${table}\n\n${steer}`, mediaListings: null };
+        }
     }
 
     // They turned ONE listing down. Not a decline — they're still shopping, so
@@ -1296,6 +1404,7 @@ module.exports = {
     hasAnyFilter,
     formatListingsBody,
     formatListingsSummary,
+    formatComparison,
     extractViewingSelection,
     extractAppointmentDateTime,
 };

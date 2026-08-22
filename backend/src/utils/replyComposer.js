@@ -249,6 +249,39 @@ Write the redirect.`;
     return callComposer(system, user, BOT_STRINGS.off_topic[lang]);
 };
 
+// ── composeComparison ──
+// The one line UNDER a comparison table that says which way to lean. This is
+// the difference between dumping data and actually helping.
+//
+// The table itself is rendered deterministically by formatComparison; this
+// writes only the judgement — and only in terms of priorities the customer has
+// actually expressed. "If staying near work matters most, the first is closer"
+// is useful; inventing a priority they never mentioned is not.
+const composeComparison = async ({ lang, userMessage, summary, statedPriorities, history }) => {
+    const system = `${BASE_PERSONA}
+
+Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
+
+Your task: the customer asked you to compare properties. A side-by-side breakdown is printed directly BELOW your line, so do NOT list the prices, areas or bedroom counts yourself — they will see them.
+
+Write ONE short sentence pointing them toward whichever suits them, framed as a trade-off ("if X matters more to you, then the first; if Y, the second").
+
+${statedPriorities
+        ? `What this customer has actually told you matters to them: ${statedPriorities}. Base your steer on that.`
+        : `They have NOT told you what matters most to them. So do not guess a priority — instead, name the single clearest difference between the options and ask which of those two things matters more.`}
+
+These are the ONLY facts you may use. Every detail you mention must appear here, attributed to the same numbered property it is listed under — do not carry details across from one to the other, and do not use anything from earlier in the conversation:
+${summary}
+
+Do not say one is "better". Do not recommend booking. Do not mention any feature not listed above.${historyBlock(history)}`;
+
+    const user = `The customer wrote: "${userMessage}"
+
+Write the one-line steer.`;
+
+    return callComposer(system, user, BOT_STRINGS.comparison_intro[lang]);
+};
+
 // ── composeAskRejectionReason ──
 // They turned one down without saying why. "Okay" is a wasted turn; asking
 // WHAT was wrong is what turns a rejection into a better next search — and
@@ -456,6 +489,7 @@ module.exports = {
     composeOffTopic,
     composeHandoff,
     composeAskRejectionReason,
+    composeComparison,
     composeUnsupportedMedia,
     composeLanguageSwitch,
     composeClosing,

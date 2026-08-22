@@ -84,10 +84,41 @@ const apptCount = async (phone) => {
     return rows[0].n;
 };
 
+// ── Scenario selection ──
+//   npm run smoke-bot              every scenario (the pre-commit gate)
+//   npm run smoke-bot -- 30-34     a range
+//   npm run smoke-bot -- 3,7,12    specific ones
+//
+// A full run is roughly 200 Claude calls against the project's own API budget.
+// While iterating on one feature that is mostly waste, so this makes the tight
+// loop cheap. It is NOT a substitute for the full run: ALWAYS run the whole
+// suite before committing, because the failures that matter most here have
+// historically been in code the change did not appear to touch.
+const parseSelection = (arg) => {
+    if (!arg) return null;
+    const wanted = new Set();
+    for (const part of arg.split(',')) {
+        const range = part.trim().match(/^(\d+)-(\d+)$/);
+        if (range) {
+            for (let i = Number(range[1]); i <= Number(range[2]); i += 1) wanted.add(i);
+        } else if (/^\d+$/.test(part.trim())) {
+            wanted.add(Number(part.trim()));
+        }
+    }
+    return wanted.size ? wanted : null;
+};
+const selection = parseSelection(process.argv[2]);
+let skipped = 0;
+
 // Each scenario gets its own phone number so they can't contaminate each other.
 let seq = 0;
 const scenario = async (title, fn) => {
+    // seq increments even when skipped, so scenario numbers stay stable
+    // whichever subset is run — otherwise "run scenario 30" would mean a
+    // different test depending on the filter.
     seq += 1;
+    if (selection && !selection.has(seq)) { skipped += 1; return; }
+
     const phone = `9990001${String(seq).padStart(5, '0')}`;
     console.log(`\n${'-'.repeat(72)}\n${seq}. ${title}`);
     await cleanup(phone);
@@ -466,7 +497,26 @@ const run = async () => {
             JSON.stringify(prof2.rejection_reasons));
     });
 
+    await scenario('COMPARE: "compare 1 and 2" sets them side by side and steers', async (p) => {
+        await send(p, 'I want to rent a villa in Lome');
+        const r = await send(p, 'compare 1 and 2');
+        // Facts come from the DB rows, so the real figures must be present.
+        check('shows a side-by-side breakdown', /F CFA/.test(r.reply) && /\(1\)/.test(r.reply) && /\(2\)/.test(r.reply),
+            r.reply.slice(0, 200));
+        check('comparing does not end the booking flow',
+            r.pendingAction === 'awaiting_viewing_selection', `pending=${r.pendingAction}`);
+        // They stated no priorities, so it must ASK what matters rather than
+        // inventing a preference for them.
+        check('asks what matters instead of guessing a priority',
+            /\?/.test(r.reply), r.reply.slice(-160));
+    });
+
     console.log(`\n${'='.repeat(72)}`);
+    if (skipped > 0) {
+        // Stated loudly: a green partial run is not a green suite, and this
+        // line is the difference between "verified" and "probably fine".
+        console.log(`PARTIAL RUN — ${skipped} scenario(s) skipped. Run without arguments before committing.`);
+    }
     console.log(failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`);
     console.log('all test leads cleaned up.\n');
     process.exit(failures === 0 ? 0 : 1);

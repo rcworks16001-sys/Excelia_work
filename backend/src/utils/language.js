@@ -142,6 +142,11 @@ const BOT_STRINGS = {
         fr: "Avec plaisir ! N'hésitez pas à m'écrire si vous avez besoin d'autre chose.",
         en: "You're welcome! Feel free to message me any time if you need anything else.",
     },
+    // Prefixes the deterministic comparison table.
+    comparison_intro: {
+        fr: 'Voici les deux côte à côte :',
+        en: "Here's how they compare:",
+    },
     // Asked when a lead turns a listing down without saying why. The answer is
     // what turns "no" into a better next search.
     ask_rejection_reason: {
