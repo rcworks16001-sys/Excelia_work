@@ -22,4 +22,8 @@ router.patch('/:id/notes', authenticateAdmin, leadController.updateNotes);
 // the admin, body: { lang }. Not persisted — see utils/summarizer.js.
 router.post('/:id/summary', authenticateAdmin, leadController.summarizeLeadConversation);
 
+// DELETE /api/leads/:id — permanently erase the lead + everything cascaded
+// from it (conversations, appointments, profile, events, notifications).
+router.delete('/:id', authenticateAdmin, leadController.deleteLead);
+
 module.exports = router;

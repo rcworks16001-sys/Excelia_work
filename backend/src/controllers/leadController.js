@@ -478,6 +478,33 @@ const summarizeLeadConversation = async (req, res) => {
     }
 };
 
+// ── deleteLead(req, res) ──
+// Permanently erases a lead and everything derived from them — conversations,
+// appointments, lead_profiles, lead_events, notifications all cascade via
+// ON DELETE CASCADE (see migrate.js), so one DELETE on `leads` is enough.
+// Unlike property delete, there is deliberately NO 409-if-has-appointments
+// guard here: the client explicitly wants full erasure (including any
+// booking history for this lead), so that same number is treated as a brand
+// new lead the next time it messages (getOrCreateLead finds no row and
+// inserts one).
+const deleteLead = async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+        return res.status(400).json({ error: 'Invalid lead id' });
+    }
+
+    try {
+        const result = await pool.query('DELETE FROM leads WHERE id = $1 RETURNING id', [id]);
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Lead not found' });
+        }
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting lead:', error);
+        res.status(500).json({ error: 'Failed to delete lead' });
+    }
+};
+
 module.exports = {
     getOrCreateLead,
     getLeadState,
@@ -493,6 +520,7 @@ module.exports = {
     updateNotes,
     sendReply,
     summarizeLeadConversation,
+    deleteLead,
     advanceLeadStatus,
     VALID_STATUSES,
     STATUS_LADDER,

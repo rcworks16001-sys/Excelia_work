@@ -8,7 +8,7 @@ import { useDashboardLanguage } from '../../lib/useDashboardLanguage';
 import { dashboardStrings, formatTimeAgo } from '../../lib/dashboardStrings';
 
 const LANGUAGE_LABEL = { fr: 'FR', en: 'EN' };
-const GRID_COLUMNS = '1.8fr 1.3fr 0.7fr 1.2fr 1.1fr 1.1fr';
+const GRID_COLUMNS = '1.8fr 1.3fr 0.7fr 1.2fr 1.1fr 1.1fr 32px';
 
 function SkeletonRow() {
     return (
@@ -16,7 +16,7 @@ function SkeletonRow() {
             display: 'grid', gridTemplateColumns: GRID_COLUMNS,
             padding: '15px 20px', borderBottom: '1px solid var(--ice)', alignItems: 'center', gap: 8,
         }}>
-            {[['60%', 12], ['70%', 10], ['30%', 18], ['50%', 18], ['50%', 10], ['50%', 10]].map(([w, h], i) => (
+            {[['60%', 12], ['70%', 10], ['30%', 18], ['50%', 18], ['50%', 10], ['50%', 10], ['100%', 10]].map(([w, h], i) => (
                 <div key={i} className="skeleton" style={{ height: h, width: w }} />
             ))}
         </div>
@@ -31,6 +31,9 @@ export default function LeadsOverviewPage() {
     const [search, setSearch] = useState('');
     const [statusFilter, setStatusFilter] = useState('all');
     const [statusUpdateError, setStatusUpdateError] = useState('');
+    const [deleteTarget, setDeleteTarget] = useState(null); // the lead pending confirmation, or null
+    const [deleting, setDeleting] = useState(false);
+    const [deleteError, setDeleteError] = useState('');
     const [lang] = useDashboardLanguage();
     const t = dashboardStrings[lang].leadsOverview;
 
@@ -66,6 +69,28 @@ export default function LeadsOverviewPage() {
                 return;
             }
             setStatusUpdateError(t.statusUpdateError);
+        }
+    };
+
+    // Two-step: opens an in-app confirm dialog naming this exact lead, rather
+    // than a bare window.confirm() — mirrors the Properties delete pattern.
+    const confirmDeleteLead = async () => {
+        if (!deleteTarget) return;
+        const id = deleteTarget.id;
+        setDeleting(true);
+        setDeleteError('');
+        try {
+            await api.delete(`/leads/${id}`);
+            setLeads((prev) => prev.filter((l) => l.id !== id));
+            setDeleteTarget(null);
+        } catch (err) {
+            if (err.response?.status === 401) {
+                router.push('/login');
+                return;
+            }
+            setDeleteError(t.deleteLeadError);
+        } finally {
+            setDeleting(false);
         }
     };
 
@@ -163,6 +188,8 @@ export default function LeadsOverviewPage() {
                             {h}
                         </div>
                     ))}
+                    <div />
+
                 </div>
 
                 {loading && [1, 2, 3, 4].map((i) => <SkeletonRow key={i} />)}
@@ -230,9 +257,72 @@ export default function LeadsOverviewPage() {
                         </select>
                         <div style={{ fontSize: 12, color: 'var(--fog)' }}>{formatTimeAgo(lead.created_at, lang)}</div>
                         <div style={{ fontSize: 12, color: 'var(--fog)' }}>{formatTimeAgo(lead.last_message_at, lang)}</div>
+                        <button
+                            onClick={(e) => { e.stopPropagation(); setDeleteError(''); setDeleteTarget(lead); }}
+                            title={t.deleteLead}
+                            style={{
+                                fontSize: 14, color: 'var(--fog)', background: 'none', border: 'none',
+                                cursor: 'pointer', padding: 4, lineHeight: 1,
+                            }}
+                        >
+                            🗑
+                        </button>
                     </div>
                 ))}
             </div>
+
+            {deleteTarget && (
+                <div
+                    onClick={() => !deleting && setDeleteTarget(null)}
+                    style={{
+                        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+                    }}
+                >
+                    <div
+                        onClick={(e) => e.stopPropagation()}
+                        style={{
+                            background: '#fff', borderRadius: 'var(--r-card)', padding: 24,
+                            width: '100%', maxWidth: 380,
+                        }}
+                    >
+                        <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8, color: 'var(--ink)' }}>
+                            {t.deleteLeadTitle}
+                        </div>
+                        <div style={{ fontSize: 13, color: 'var(--ash)', marginBottom: 4 }}>
+                            {deleteTarget.name || t.unknownName} — {deleteTarget.phone}
+                        </div>
+                        <div style={{ fontSize: 12, color: '#b91c1c', marginBottom: 20 }}>
+                            {t.deleteLeadWarning}
+                        </div>
+                        {deleteError && <div style={{ fontSize: 12, color: '#b91c1c', marginBottom: 12 }}>{deleteError}</div>}
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                            <button
+                                onClick={() => setDeleteTarget(null)}
+                                disabled={deleting}
+                                style={{
+                                    fontSize: 13, fontWeight: 600, padding: '8px 16px', borderRadius: 'var(--r-btn)',
+                                    border: '1px solid var(--ice)', background: '#fff', color: 'var(--ash)',
+                                    cursor: deleting ? 'default' : 'pointer',
+                                }}
+                            >
+                                {t.cancel}
+                            </button>
+                            <button
+                                onClick={confirmDeleteLead}
+                                disabled={deleting}
+                                style={{
+                                    fontSize: 13, fontWeight: 700, padding: '8px 16px', borderRadius: 'var(--r-btn)',
+                                    border: 'none', background: '#b91c1c', color: '#fff',
+                                    cursor: deleting ? 'default' : 'pointer', opacity: deleting ? 0.7 : 1,
+                                }}
+                            >
+                                {deleting ? t.deleting : t.deleteLead}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {!loading && (
                 <div style={{ marginTop: 10, fontSize: 12, color: 'var(--fog)', textAlign: 'right' }}>

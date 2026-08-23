@@ -129,6 +129,7 @@ is for the admin's eyes only, never sent to the lead.
 - Phone numbers ARE sent to the frontend unmasked (Leads list, Lead Detail, Appointments) — client decision, overriding the original masking rule: the admin needs the real number to actually call/WhatsApp a lead back. `maskPhone()` still exists in `utils/format.js` but nothing calls it anymore.
 - Reply-to-lead from the dashboard is deliberately **not** written to the `conversations` table — the admin's message is appended to the frontend's local state only (so it's visible in the UI immediately) but won't survive a page refresh. This was an explicit simplification, not an oversight.
 - Property delete is blocked (409), not cascaded, when a property has appointments — an admin must not be able to silently destroy booking history via a UI delete button. There is no "force delete" escape hatch by design.
+- Lead delete is the OPPOSITE policy from property delete, deliberately: `DELETE /api/leads/:id` fully cascades (conversations, appointments, lead_profiles, lead_events, notifications all have `ON DELETE CASCADE` on `lead_id`), with no 409 guard. This was an explicit client request — full erasure, and the same phone number is treated as a brand-new lead on its next message (`getOrCreateLead` finds no row and inserts one). In-app confirm modal on the Leads overview page, same pattern as property delete.
 - Property description translation happens **once, at write time** (on create, or via the backfill script), never per page-view or per bot reply — a translate-on-read approach would add latency to every WhatsApp message and cost money per view for no benefit, since the text never changes after creation.
 - Bot replies are composed by Claude, not hardcoded — see "Conversational bot architecture" below. This reverses the original "all bot strings hardcoded" rule; `BOT_STRINGS` is now the bilingual **fallback**, not the primary path.
 - Language-switch detection uses **two mechanisms deliberately, not one**: a regex fast-path (`detectLanguageSwitchRequest`) for unambiguous phrasings, and an LLM-read `language_request` field for everything else. The regex-only version was tried first and found to be too brittle (missed "now please english", "please english", "english now") — this is documented so nobody "simplifies" it back down to one mechanism.
@@ -528,7 +529,7 @@ The Claude extraction prompt is built dynamically per call (`buildNluSystemPromp
 ## Dashboard admin features (built after Step 9)
 
 - **Properties**: search bar, type-tab filter, Add (with FR/EN description toggle), Delete (in-app confirm modal, blocked with 409 if appointments exist), multi-photo upload, single video upload, media lightbox with gallery navigation.
-- **Leads**: search bar, status pill-filter (existing), **inline status `<select>` per row** (new — previously only editable from Lead Detail), phone numbers shown in full.
+- **Leads**: search bar, status pill-filter (existing), **inline status `<select>` per row** (new — previously only editable from Lead Detail), phone numbers shown in full, **per-row delete** (in-app confirm modal, fully cascades — see "Key decisions").
 - **Lead Detail**: status editor, conversation thread (polls every 5s while visible), reply-to-lead textarea (sends via WhatsApp, not persisted to `conversations`), notes textarea (auto-saves, persisted, separate system from the conversation), appointments panel with translated status.
 - **Appointments**: search bar, status pill-filter, **status `<select>` per row** (new — previously read-only), Togo-timezone-correct date/time display, graceful display for vague requested times (falls back through: exact datetime → date + part-of-day → raw text).
 
@@ -618,7 +619,7 @@ excelia/
 │       ├── controllers/
 │       │   ├── webhookController.js   ← WhatsApp inbound + ALL bot logic: NLU (extractSearchFilters/extractViewingSelection/extractAppointmentDateTime), the NBA branch dispatch, booking-flow handlers, sendWhatsAppMessage/Image/Video/Location, sendListingMedia. processInboundMessage() is the whole bot minus transport - handleMessage is envelope + idempotency + send only.
 │       │   ├── propertyController.js  ← searchProperties() (dashboard, via buildQuery()) / rankPropertiesForLead() (bot, via utils/propertyMatcher.js), getKnownLocations(), create/remove, photo+video upload/delete, listing status
-│       │   ├── leadController.js      ← lead CRUD, getRecentConversation() (bot memory), booking pending-flow state + TTL, updateLeadNameIfMissing(), forward-only status pipeline (advanceLeadStatus), updateNotes, sendReply, summarizeLeadConversation (not persisted)
+│       │   ├── leadController.js      ← lead CRUD, getRecentConversation() (bot memory), booking pending-flow state + TTL, updateLeadNameIfMissing(), forward-only status pipeline (advanceLeadStatus), updateNotes, sendReply, summarizeLeadConversation (not persisted), deleteLead (full cascade, no guard)
 │       │   ├── leadProfileController.js ← owns lead_profiles: mergeProfile() (three-state merge), flagForHuman(), refreshLeadSignals() (scoring + status advance each turn), profileToSearchFilters()
 │       │   ├── leadEventController.js ← owns lead_events: recordEvent(), getEventsForLead(), countTrailingEvents() (repeated-misunderstanding escalation)
 │       │   ├── notificationController.js ← owns notifications: createNotification() (deduped), list/markRead/markAllRead for the dashboard bell
@@ -628,7 +629,7 @@ excelia/
 │       ├── routes/
 │       │   ├── webhook.js
 │       │   ├── properties.js          ← includes create/delete, photo upload/delete, video upload/delete endpoints
-│       │   ├── leads.js               ← includes status PATCH, notes PATCH, reply POST, summary POST
+│       │   ├── leads.js               ← includes status PATCH, notes PATCH, reply POST, summary POST, delete DELETE (fully cascades, unlike property delete)
 │       │   ├── appointments.js        ← includes status PATCH
 │       │   ├── auth.js
 │       │   ├── notifications.js       ← list, read-all PATCH, per-id read PATCH
