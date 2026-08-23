@@ -539,8 +539,8 @@ const extractViewingSelection = async (text, listingCount, history = []) => {
   * "express_interest" — they say they LIKE or prefer one, without actually asking to book it ("ok, 1 I liked", "the first one looks nice", "I prefer the villa", "j'aime bien le 2"). Liking is NOT the same as booking. Set selected_number.
   * "wants_to_book" — they clearly want to book but have NOT said which property ("yes", "yes I want to book an appointment", "oui je veux visiter"). An enthusiastic yes is NOT unclear.
   * "new_search" — they are changing or refining what they're looking for rather than picking from the list ("actually under 400000", "do you have apartments instead?", "what about Bè?", "something cheaper"). This is a NEW requirement, not a selection.
-  * "request_media" — they are asking to SEE more of a specific listing rather than to book it ("can you share some photos of 1", "more pictures of the second one", "send me the video", "où se trouve le 2 ?"). Set selected_number to the listing they mean. Wanting to look at photos is NOT the same as choosing to book a viewing.
-  * "question" — they are ASKING something about a listing rather than choosing ("what is the price of 2?", "how many bedrooms?", "where is it?"). Set selected_number if they name one.
+  * "request_media" — they are asking for PHOTOS or VIDEO of a specific listing ("can you share some photos of 1", "more pictures of the second one", "send me the video", "any images?"). This is specifically about visual media — never use it for a request for information/description.
+  * "question" — they are ASKING for information about a listing rather than choosing, INCLUDING a general request to know more about it. This covers both a narrow fact ("what is the price of 2?", "how many bedrooms?") AND a general request for detail ("tell me more about the 2nd one", "more details on number 1", "what's the story with number 2", "en dire plus sur le premier", "où se trouve le 2 ?" [asking a location FACT, not to be sent a media file]). The word "more" here means MORE INFORMATION, not more photos — only classify as "request_media" if they explicitly name a visual thing (photo, picture, image, video). Set selected_number if they name one.
   * "objection" — they push back on ALL of them without naming one and without giving new criteria ("these are all too expensive", "it's out of my price range", "too far from everything", "I'll think about it", "je vais réfléchir"). Set objection_type: "price", "location", "size", or "thinking_about_it". If they name a specific listing use "reject_property"; if they state a new requirement use "new_search".
   * "compare" — they want two or three listings set side by side ("compare 1 and 3", "what's the difference between the first two?", "quelle est la différence entre 1 et 2 ?"). Set compare_numbers to the listing numbers they named. If they say "compare them" without naming any, set compare_numbers to all of them.
   * "reject_property" — they DISLIKE one of the listings shown, without ending the conversation ("I don't like the first one", "not the second one", "le 1 ne me plaît pas", "the villa is too expensive"). Set selected_number. Set rejection_reason if they say WHY ("too expensive" -> "price", "too far"/"wrong area" -> "location", "too small"/"not enough rooms" -> "size", "I wanted an apartment" -> "type"); leave rejection_reason null if they just said no. This is NOT a decline — they are still looking.
@@ -599,8 +599,8 @@ const extractAppointmentDateTime = async (text, referenceNow = null, history = [
             system: `The current date/time is ${now} (UTC). The user was just asked for their preferred date and time for a property viewing in Togo, and is replying in French or English, possibly with a relative expression ("demain", "next Friday at 3pm", "vendredi prochain").
 - decision — what the reply actually is:
   * "datetime_given" — they gave a date and/or time, even partially ("tomorrow", "friday afternoon", "asap").
-  * "request_media" — they are asking to SEE the property ("can you share some photos?", "send me the video", "any pictures?"). This is NOT a decline.
-  * "question" — they are asking something about the property ("what is the price again?", "where is it located?", "how many bedrooms?"). This is NOT a decline.
+  * "request_media" — they are asking for PHOTOS or VIDEO of the property ("can you share some photos?", "send me the video", "any pictures?"). Only for an explicit request for a visual file. This is NOT a decline.
+  * "question" — they are asking for information about the property, including a general request to know more ("what is the price again?", "where is it located?", "how many bedrooms?", "tell me more about it", "more details please"). The word "more" here means MORE INFORMATION unless they explicitly name a photo/picture/video. This is NOT a decline.
   * "greeting" — a greeting or pleasantry ("hello", "hi", "bonjour").
   * "closing" — thanks / goodbye ("thank you", "merci").
   * "wants_human" — they need a person: asking for an agent, trying to NEGOTIATE price or terms ("can you lower the price?", "c'est négociable ?"), complaining, or asking a legal/financial question. Set handoff_reason. This is NOT a decline — they may still want the viewing.
@@ -720,6 +720,67 @@ const comparisonFactSheet = (properties, lang) => properties
 const formatListingsSummary = (listings, lang) =>
     `${BOT_STRINGS.results_intro[lang]}\n\n${formatListingsBody(listings, lang)}`;
 
+// ── performSearchAndRespond(leadId, profile, { lang, history, userMessage, lockType }) ──
+// The one place a property search is actually executed and turned into a
+// reply. Extracted so the price-driven re-search after a rejection/objection
+// (below) can call it directly against the profile it JUST updated, instead
+// of returning null and forcing a second, redundant NLU pass over the
+// rejection message itself ("too expensive" alone carries no type/city/
+// bedrooms information to re-extract, and re-classifying it risked
+// misreading it as something else entirely).
+//
+// lockType is the actual bug fix: without it, a soft-scored ranking lets a
+// tightened budget ceiling surface a cheaper WRONG-TYPE listing ahead of an
+// over-budget CORRECT-TYPE one (WEIGHTS.budget + WEIGHTS.location together
+// outweigh WEIGHTS.type in propertyMatcher.js) — a lead who rejected a villa
+// as "too expensive" was shown single rooms. See rankProperties for the
+// mechanics; this is the only caller that passes lockType: true.
+const performSearchAndRespond = async (leadId, profile, { lang, history = [], userMessage = '', lockType = false } = {}) => {
+    // Filters come from the PROFILE, not the triggering message — a
+    // requirement built up over several turns (or just updated by a
+    // rejection handler) is searched in full.
+    const searchFilters = profileToSearchFilters(profile);
+    // Ranked, not filtered: near-misses are shown in position with an honest
+    // ✗ rather than silently dropped or silently substituted. Capped low —
+    // the doc's "show 3-5, not 20" — and aligned with sendListingMedia's own
+    // 3-listing cap, which previously meant a lead could get 10 cards but 3
+    // sets of photos.
+    const { listings, relaxed } = await rankPropertiesForLead(searchFilters, {
+        limit: MAX_LISTINGS_SHOWN,
+        lang,
+        // Things they've already turned down sink to the bottom rather than
+        // being offered again as if new.
+        rejectedIds: profile?.rejected_property_ids || [],
+        lockType,
+    });
+
+    if (listings.length === 0) {
+        // Worth recording as its own event: "how often does the catalogue
+        // fail a real request?" is the single most useful signal about what
+        // inventory to acquire next.
+        await recordEvent(leadId, EVENT_TYPES.SEARCH_RETURNED_NOTHING, {
+            metadata: { filters: searchFilters },
+        });
+        return { text: await composeNoResults({ lang, userMessage, history }), mediaListings: null };
+    }
+
+    // Claude writes ONLY the intro line; the listing cards and the booking
+    // prompt stay template-rendered so no price or property detail can ever
+    // be model-invented.
+    const intro = await composeResultsIntro({
+        lang, userMessage, listings, relaxed, filters: searchFilters, history,
+    });
+    const text = `${intro}\n\n${formatListingsBody(listings, lang)}\n\n${BOT_STRINGS.booking_prompt[lang]}`;
+    // Remember which listings were shown (in the same numbered order) so a
+    // reply like "2" resolves to a specific property.
+    await setPendingViewingSelection(leadId, listings.map((p) => p.id));
+    await recordShownListings(leadId, listings.map((p) => p.id));
+    await recordEvent(leadId, EVENT_TYPES.PROPERTIES_SHOWN, {
+        metadata: { propertyIds: listings.map((p) => p.id), relaxed },
+    });
+    return { text, mediaListings: listings };
+};
+
 // ── Booking flow, step 1: which listing (or decline)? ──
 // Returns { text, mediaListings } rather than a bare string, because this is
 // the one path where the lead can ask to SEE more of a listing — and the
@@ -773,7 +834,7 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
         if (property) {
             return {
                 text: await composeListingAnswer({
-                    lang, userMessage: text, propertyCard: formatListingsBody([property], lang), history, stillNeeded: 'selection',
+                    lang, userMessage: text, propertyCard: formatListingsBody([property], lang), history, stillNeeded: 'viewing_for_named',
                 }),
                 mediaListings: null,
             };
@@ -813,9 +874,14 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
                     clearedFields: ['budget_stretch_max'],
                 });
             }
-            // null hands back to the search path, which re-ranks with the
-            // lowered ceiling.
-            return null;
+            // Re-search immediately against the profile we JUST updated —
+            // same reasoning as the single-listing price rejection above.
+            // lockType keeps type/transaction/city/neighbourhood/bedrooms
+            // exactly as stated; only the ceiling moves.
+            const updatedProfile = await getProfile(leadId);
+            return performSearchAndRespond(leadId, updatedProfile, {
+                lang, history, userMessage: text, lockType: true,
+            });
         }
 
         return {
@@ -906,11 +972,24 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
                         clearedFields: ['budget_stretch_max'],
                     });
                 }
+
+                // Re-search immediately against the profile we JUST updated —
+                // not a second NLU pass over "too expensive" itself (see
+                // performSearchAndRespond). lockType keeps property_type,
+                // transaction, city, neighbourhood and bedrooms exactly as
+                // they were: a price rejection narrows the budget, it does
+                // not relax what kind of place they asked for.
+                const updatedProfile = await getProfile(leadId);
+                return performSearchAndRespond(leadId, updatedProfile, {
+                    lang, history, userMessage: text, lockType: true,
+                });
             }
 
-            // They told us why, so re-searching now beats interrogating them.
-            // Returning null hands control back to the search path, which
-            // re-ranks with this listing sunk and any new ceiling applied.
+            // A non-price reason ("too far", "too small") isn't something we
+            // can act on programmatically — re-searching now beats
+            // interrogating them, but only a fresh understanding pass can
+            // tell us what to change. Returning null hands control back to
+            // the search path.
             return null;
         }
 
@@ -1390,48 +1469,15 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                 // someone who just asked a genuine question — search anyway,
                 // which with no filters returns the cheapest listings.
                 //
-                // Filters come from the PROFILE, not this one message, so a
-                // requirement built up over several turns is searched in full.
-                const searchFilters = profileToSearchFilters(profile);
-                // Ranked, not filtered: near-misses are shown in position with
-                // an honest ✗ rather than silently dropped or silently
-                // substituted. Capped low — the doc's "show 3-5, not 20" — and
-                // aligned with sendListingMedia's own 3-listing cap, which
-                // previously meant a lead could get 10 cards but 3 sets of
-                // photos.
-                const { listings, relaxed } = await rankPropertiesForLead(searchFilters, {
-                    limit: MAX_LISTINGS_SHOWN,
-                    lang,
-                    // Things they've already turned down sink to the bottom
-                    // rather than being offered again as if new.
-                    rejectedIds: profile?.rejected_property_ids || [],
+                // See performSearchAndRespond above — same helper the
+                // price-driven rejection/objection re-search uses (below),
+                // just without lockType: a plain search keeps property type
+                // as the usual soft criterion, exactly as before.
+                const searchResult = await performSearchAndRespond(leadId, profile, {
+                    lang, history, userMessage: text,
                 });
-
-                if (listings.length === 0) {
-                    // Worth recording as its own event: "how often does the
-                    // catalogue fail a real request?" is the single most
-                    // useful signal about what inventory to acquire next.
-                    await recordEvent(leadId, EVENT_TYPES.SEARCH_RETURNED_NOTHING, {
-                        metadata: { filters: searchFilters },
-                    });
-                    replyBody = await composeNoResults({ lang, userMessage: text, history });
-                } else {
-                    // Claude writes ONLY the intro line; the listing cards and
-                    // the booking prompt stay template-rendered so no price or
-                    // property detail can ever be model-invented.
-                    const intro = await composeResultsIntro({
-                        lang, userMessage: text, listings, relaxed, filters: searchFilters, history,
-                    });
-                    replyBody = `${intro}\n\n${formatListingsBody(listings, lang)}\n\n${BOT_STRINGS.booking_prompt[lang]}`;
-                    // Remember which listings were shown (in the same numbered
-                    // order) so a reply like "2" resolves to a specific property.
-                    await setPendingViewingSelection(leadId, listings.map((p) => p.id));
-                    await recordShownListings(leadId, listings.map((p) => p.id));
-                    await recordEvent(leadId, EVENT_TYPES.PROPERTIES_SHOWN, {
-                        metadata: { propertyIds: listings.map((p) => p.id), relaxed },
-                    });
-                    listingsShown = listings;
-                }
+                replyBody = searchResult.text;
+                listingsShown = searchResult.mediaListings;
             }
         }
 

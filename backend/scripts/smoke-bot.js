@@ -550,18 +550,42 @@ const run = async () => {
             r.pendingAction === 'awaiting_viewing_selection', `pending=${r.pendingAction}`);
     });
 
-    await scenario('REJECTION on price shows CHEAPER options, never dearer ones', async (p) => {
-        await send(p, 'I want to rent a villa in Lome, 4 bedrooms, budget 400000');
-        // The villa they reject is the cheapest one that fits. Sinking it
-        // without moving the budget promoted the DEARER villas — the bot
-        // answering "too expensive" with something costlier.
+    await scenario('REJECTION on price re-searches the SAME type, never drops it', async (p) => {
+        const first = await send(p, 'I want to rent a villa in Lome, 4 bedrooms, budget 400000');
+        const rejectedId = first.media && first.media[0] && first.media[0].id;
+        // The villa they reject is the cheapest one that fits — with only 3
+        // villas in the demo catalogue, rejecting it leaves nothing cheaper
+        // of that type at all. That used to (a) let cheaper WRONG-TYPE
+        // listings (single rooms, apartments) outrank the over-budget
+        // correct-type ones, and, once type was locked, (b) pad the result
+        // out with the same listing they just rejected (sunk but not
+        // removed). Both are checked here.
         const r = await send(p, "I don't like the first one, too expensive");
-        const prices = [...r.reply.matchAll(/([\d ]+) F CFA/g)]
-            .map((m) => Number(m[1].replace(/ /g, '')))
-            .filter((n) => Number.isFinite(n) && n > 0);
-        check('offered something', prices.length > 0, r.reply.slice(0, 150));
-        check('everything offered is cheaper than what they rejected',
-            prices.every((n) => n < 350000), `prices=${prices.join(',')}`);
+        check('offered something', Array.isArray(r.media) && r.media.length > 0, r.reply.slice(0, 150));
+        check('everything offered is still a villa (type not dropped)',
+            (r.media || []).every((m) => m.type === 'villa'),
+            `types=${(r.media || []).map((m) => m.type).join(',')}`);
+        check('the just-rejected listing is not shown again',
+            (r.media || []).every((m) => m.id !== rejectedId),
+            `ids=${(r.media || []).map((m) => m.id).join(',')} rejectedId=${rejectedId}`);
+    });
+
+    await scenario('REQUEST_DETAILS: "tell me more about the 2nd one" answers in text, not photos', async (p) => {
+        const first = await send(p, 'I want to rent a villa in Lome');
+        const target = first.media && first.media[1]; // "the 2nd one"
+        // "Tell me more" was previously conflated with "more pictures" purely
+        // because both contain the word "more" — it re-sent photos and asked
+        // "which one interests you most?", ignoring the question and re-asking
+        // something they had already effectively answered by naming a listing.
+        const r = await send(p, 'tell me more about the 2nd one');
+        check('answered in text, no media sent', r.media === null, `media=${JSON.stringify(r.media)}`);
+        check('names the actual listing asked about',
+            Boolean(target) && r.reply.includes(target.neighbourhood),
+            `expected=${target && target.neighbourhood} reply=${r.reply.slice(0, 200)}`);
+        check('asks about arranging a viewing, not "which one"',
+            /viewing|visite|visit|see it|in person/i.test(r.reply) && !/which (property|one)|quel bien|lequel/i.test(r.reply),
+            r.reply.slice(0, 250));
+        check('booking flow still alive', r.pendingAction === 'awaiting_viewing_selection', `pending=${r.pendingAction}`);
     });
 
     await scenario('KNOWLEDGE mid-booking: a question is answered, not "I didn\'t catch that"', async (p) => {

@@ -63,7 +63,7 @@ Full detail is in "Conversational bot architecture" below — this is the index.
 | **5** | `knowledge.js` (Togo property Q&A), objection handling, escalation on repeated misunderstanding |
 | **6** | Lead profile panel + activity timeline, analytics page |
 
-**Test suite: 18 → 42 scenarios / 104 checks.** `npm run smoke-bot -- 30-34` runs a subset while
+**Test suite: 18 → 44 scenarios / 108 checks.** `npm run smoke-bot -- 30-34` runs a subset while
 iterating (~15 Claude calls); **the full run is the pre-commit gate** and prints "PARTIAL RUN" when
 filtered so a subset can never be mistaken for it.
 
@@ -330,8 +330,22 @@ The bot no longer walks a progressive-relaxation cascade (that function is gone)
 - `MAX_LISTINGS_SHOWN` equals `MAX_LISTINGS_WITH_PHOTOS` on purpose; they were 10 and 3, so a lead
   could get ten cards and three sets of photos with nothing explaining the gap.
 - **`reject_property` is not `decline`.** Turning down one listing is a refinement signal and keeps the
-  flow alive; only `decline` ends a booking. Rejected ids sink in later rankings rather than being
-  removed — if it's all we have, showing it beats showing nothing.
+  flow alive; only `decline` ends a booking. Rejected ids are excluded from the normal ranking (not
+  merely sunk to the bottom of it) — they only reappear as an actual last resort, when zero non-rejected
+  candidates exist at all, because showing one then still beats showing nothing. (Sinking-but-keeping
+  was the original design; it let a just-rejected listing pad out a short result set, which surfaced
+  once `lockType` narrowed the candidate pool — see below.)
+- **A price-driven re-search locks `type` as a hard filter for that one call (`lockType`).** Without it,
+  `WEIGHTS.budget` (25) + `WEIGHTS.location` (20) together outweigh `WEIGHTS.type` (15), so once a
+  rejection/objection pushes the budget ceiling below every listing of the stated type, a cheaper
+  WRONG-TYPE listing can out-score an over-budget CORRECT-TYPE one — a lead who rejected a villa as "too
+  expensive" was shown single rooms. `handleViewingSelectionReply`'s price-rejection and whole-set
+  price-objection branches (`webhookController.js`) now re-search **immediately**, from the profile they
+  just updated, via a shared `performSearchAndRespond()` helper with `lockType: true` — instead of
+  returning `null` and forcing a second, redundant NLU pass over the rejection message itself (which
+  never restates the type, so it added risk for no benefit). The plain search path uses the same helper
+  without `lockType`, so nothing changed there. Falls back to the full pool if no listing of that type
+  exists at all, so a genuine catalogue gap never dead-ends the reply. Smoke scenario 39.
 
 ### Dashboard: profile panel, activity timeline, analytics
 - `GET /leads/:id` gained `profile` and `events` as NEW top-level keys. It is polled every 5s with
@@ -415,6 +429,22 @@ Both booking-flow NLUs (`extractViewingSelection` for "which listing?", `extract
 - **Datetime state** (`AppointmentDateTimeSchema.decision`): `datetime_given` (only when a real date/time was resolved — guarded by `looksLikeDateText()` so vague text can never become a stored viewing time), `request_media`, `question`, `greeting`, `closing`, `decline` (the only one that actually cancels). `handleViewingDateTimeReply` returns `{ text, mediaListings }` (not a bare string) precisely so a mid-datetime photo request can resend media without losing the booking.
 
 **When adding a new decision type to either schema:** ask "does this need to end the booking?" — if the answer is no (and it almost always is), it must NOT map to `decline`, and the handler must return normally (keeping `pendingAction` set) rather than calling `clearPendingAction`.
+
+**`request_media` vs `question` — "tell me more" is information, not a photo request.** A real bug: "tell
+me more about the 2nd one" / "more details on number 1" were classified `request_media` (re-sent photos,
+ended with "which one interests you most?") instead of `question` (answer from the DB row, end by asking
+about booking *that* listing). Both schemas' prompts previously distinguished them only by example
+phrasing, and "more pictures of the second one" / "tell me more about the second one" are lexically close
+enough that the model latched onto the word "more" and picked media. Fixed by making the two schemas
+explicit: `request_media` is ONLY for an explicit photo/picture/video/image word; `question` covers a
+general "tell me more" the same as a narrow fact question, since both are answered the same way — from
+the DB row, never from the model's own words. `composeListingAnswer`'s ending also needed its own
+`stillNeeded` variant (`'viewing_for_named'`, `replyComposer.js`): the existing `'selection'` variant
+ends with "which property would you like?", which ignores the listing they just named and asks them to
+choose all over again. Selection-state `question` replies now end with "would you like to arrange a
+viewing for it?" instead. The datetime-step `question` handler is unaffected — it already correctly asks
+for the date again (`stillNeeded: 'date'`), since at that point a property is already chosen. Smoke
+scenario 40.
 
 ### The composer never invents a fact or claims an action happened
 Two hard rules baked into `BASE_PERSONA` in `utils/replyComposer.js`:

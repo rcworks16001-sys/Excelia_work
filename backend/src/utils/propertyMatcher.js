@@ -191,29 +191,53 @@ const scoreProperty = (property, filters = {}, lang = 'fr') => {
     return { score, reasons };
 };
 
-// ── rankProperties(properties, filters, { limit, lang, rejectedIds }) ──
+// ── rankProperties(properties, filters, { limit, lang, rejectedIds, lockType }) ──
 // The whole candidate set in, the best few out, each carrying its reasons.
-const rankProperties = (properties, filters = {}, { limit = 3, lang = 'fr', rejectedIds = [] } = {}) => {
+//
+// lockType: makes a stated `filters.type` a HARD filter for this call only,
+// instead of the usual soft 15-point criterion. Exists for the price-driven
+// re-search after a rejection/objection (webhookController.js): WEIGHTS.budget
+// (25) + WEIGHTS.location (20) together outweigh WEIGHTS.type (15), so once a
+// budget ceiling is pushed below every listing of the stated type, a cheaper
+// WRONG-TYPE listing can out-score an over-budget CORRECT-TYPE one — a lead
+// who rejected a villa as "too expensive" would be shown single rooms. Locking
+// type for that one call keeps ranking (and its honest ✗ budget reasons)
+// scoped to the type they actually asked for. Falls back to the full pool if
+// no listing of that type exists at all, so a genuine catalogue gap never
+// dead-ends the reply.
+const rankProperties = (properties, filters = {}, { limit = 3, lang = 'fr', rejectedIds = [], lockType = false } = {}) => {
     const rejected = new Set(rejectedIds || []);
 
-    const scored = properties.map((property) => {
+    let candidatePool = properties;
+    if (lockType && filters.type) {
+        const sameType = properties.filter((p) => p.type === filters.type);
+        if (sameType.length > 0) candidatePool = sameType;
+    }
+
+    const scored = candidatePool.map((property) => {
         const { score, reasons } = scoreProperty(property, filters, lang);
         return { ...property, matchScore: score, matchReasons: reasons };
     });
 
-    scored.sort((a, b) => {
-        // Anything they have explicitly turned down sinks, but is not removed:
-        // if it is all we have, showing it beats showing nothing.
-        const aRejected = rejected.has(a.id) ? 1 : 0;
-        const bRejected = rejected.has(b.id) ? 1 : 0;
-        if (aRejected !== bRejected) return aRejected - bRejected;
+    const byScoreThenPrice = (a, b) => {
         if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
         // Cheapest first among equals — the old behaviour, now only a
         // tie-break rather than the entire ranking.
         return a.price - b.price;
-    });
+    };
 
-    const listings = scored.slice(0, limit);
+    // Anything they have explicitly turned down is excluded from the normal
+    // ranking, not just sunk to the bottom — a rejected listing padding out
+    // an otherwise-short result set looks like the bot didn't hear the
+    // rejection (this surfaced with lockType: with only a few listings of one
+    // type, "sink but keep in the slice" meant the JUST-rejected villa could
+    // still fill the last of 3 slots, over-budget-labelled at literally the
+    // ceiling it itself defined). It only reappears as an actual last
+    // resort — zero non-rejected candidates at all — because showing it then
+    // still beats showing nothing.
+    const nonRejected = scored.filter((s) => !rejected.has(s.id)).sort(byScoreThenPrice);
+    const rejectedOnly = scored.filter((s) => rejected.has(s.id)).sort(byScoreThenPrice);
+    const listings = (nonRejected.length > 0 ? nonRejected : rejectedOnly).slice(0, limit);
 
     // Which stated criteria the BEST result still fails. Feeds the intro line
     // so it can be honest up front ("no exact match") rather than leaving the

@@ -120,6 +120,11 @@ const callComposer = async (systemPrompt, userPrompt, fallback) => {
 const stillNeededLine = (stillNeeded) => {
     if (stillNeeded === 'date') return '\n\nEnd by inviting them, in a FRESH wording, to tell you a day and time that suits them. Do not repeat your earlier phrasing of that question, and do not ask which property — they have already chosen one.';
     if (stillNeeded === 'selection') return '\n\nEnd by inviting them, in a FRESH wording, to tell you which property they would like (by number). Do not repeat your earlier phrasing of that question.';
+    // Used when they asked about ONE specific, already-named listing (see
+    // composeListingAnswer). Ending with "which one would you like?" here
+    // would ignore the property they just named and ask them to choose all
+    // over again — ask about booking THAT one instead.
+    if (stillNeeded === 'viewing_for_named') return '\n\nEnd by asking, in a FRESH wording, whether they would like to arrange a viewing for THIS property. Do NOT ask "which one" — they already told you which listing they mean.';
     return '';
 };
 

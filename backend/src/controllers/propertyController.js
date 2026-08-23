@@ -133,11 +133,11 @@ const searchProperties = async (filters = {}) => {
 // cascade ran. If the catalogue ever reaches a few hundred, add a coarse SQL
 // pre-filter (city + transaction) before scoring rather than reinstating hard
 // filters on everything.
-const rankPropertiesForLead = async (filters = {}, { limit = 3, lang = 'fr', rejectedIds = [] } = {}) => {
+const rankPropertiesForLead = async (filters = {}, { limit = 3, lang = 'fr', rejectedIds = [], lockType = false } = {}) => {
     const result = await pool.query(
         `SELECT ${PROPERTY_COLUMNS} FROM properties WHERE listing_status = 'available'`
     );
-    return rankProperties(result.rows, filters, { limit, lang, rejectedIds });
+    return rankProperties(result.rows, filters, { limit, lang, rejectedIds, lockType });
 };
 
 // ── getKnownLocations() ──
