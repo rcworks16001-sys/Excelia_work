@@ -30,12 +30,22 @@ const MERGEABLE_FIELDS = [
     'purpose',
     'timeline',
     'last_objection',
+    // Qualifying-question gate (nextBestAction.js): an EXPLICIT "no
+    // preference", distinct from simply null (not asked yet). The NLU only
+    // ever reports `true` (explicitly stated) or `null` (not mentioned this
+    // turn — null means "keep", same as every other field here), so once set
+    // it is sticky by default. The webhookController.js call site is the one
+    // place allowed to send `false` deliberately, to auto-clear the flag the
+    // moment a real neighbourhood/budget value supersedes "no preference".
+    'neighbourhood_no_preference',
+    'budget_no_preference',
 ];
 
 const PROFILE_COLUMNS = `
     lead_id, transaction, property_type, city, neighbourhood,
     bedrooms_min, bedrooms_max, budget_max, budget_stretch_max,
     purpose, timeline, last_objection,
+    neighbourhood_no_preference, budget_no_preference,
     liked_property_ids, rejected_property_ids, rejection_reasons,
     last_properties_shown, conversation_summary,
     lead_score, lead_temperature, needs_human, handoff_reason, handoff_at,

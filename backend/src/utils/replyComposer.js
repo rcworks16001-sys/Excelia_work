@@ -149,22 +149,35 @@ You may refer to the property as: "${propertyLabel}". Do not state its price or 
 };
 
 // ── composeListingAnswer ──
-// They asked something about a property ("what is the price again?").
-// The full property card is appended by the caller, so the model must not
-// restate any figure itself.
-const composeListingAnswer = async ({ lang, userMessage, propertyCard, history, stillNeeded }) => {
+// They asked something about a property ("what is the price again?", "tell
+// me more about it"). Answers in natural prose and does NOT re-append the
+// full formatted listing card (type/price/✓✗ reasons/contact) — a real bug:
+// the lead already saw that card once when the listing was first shown, so
+// re-printing it on every follow-up question read as the bot glitching, not
+// helping. Still bound by the same deterministic-facts rule as the rest of
+// the app, just enforced differently here: propertyLabel/priceLabel are
+// exact strings built in code (same pattern as composeConfirmBooking) that
+// the model may reference VERBATIM, and `description` is the DB's own
+// listing text (already human-authored, never model-generated) — the model
+// is explicitly forbidden from adding any feature or number beyond those two
+// inputs, so it can paraphrase but never invent.
+const composeListingAnswer = async ({ lang, userMessage, propertyLabel, priceLabel, description, history, stillNeeded }) => {
     const system = `${BASE_PERSONA}
 
 Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
 
-Your task: the customer asked a question about a property. The property's full details are printed directly beneath your message, so answer by pointing them to it in ONE short sentence — do NOT state the price, location, or any other figure yourself.${stillNeededLine(stillNeeded)}${historyBlock(history)}`;
+Your task: the customer asked to know more about "${propertyLabel}" (${priceLabel}). Using ONLY the listing description given below, write a natural 2-4 sentence answer in flowing prose — NOT a bulleted list, NOT a repeat of a formatted card, and do not print a numbered heading. You may state the price and refer to the property using EXACTLY the label and price given to you above. Do NOT add any feature, amenity, or detail that is not explicitly present in the description below — no embellishing, no guessing, even something plausible-sounding.
+
+LISTING DESCRIPTION: "${description || 'No further description on file.'}"${stillNeededLine(stillNeeded)}${historyBlock(history)}`;
 
     const user = `The customer asked: "${userMessage}"
 
-Write your line (the details below it are handled for you).`;
+Write the answer.`;
 
-    const line = await callComposer(system, user, BOT_STRINGS.listing_answer[lang]);
-    return `${line}\n\n${propertyCard}`;
+    // Fallback still surfaces the real description (never a card) so a
+    // Claude outage degrades to plain-but-honest text, not silence.
+    const fallback = `${BOT_STRINGS.listing_answer[lang]} ${description || ''}`.trim();
+    return callComposer(system, user, fallback);
 };
 
 // ── composeMidFlowAcknowledgement ──
@@ -238,6 +251,46 @@ Your task: ALWAYS open with a warm greeting — never jump straight into a quest
 Write the greeting.`;
 
     return callComposer(system, user, BOT_STRINGS.welcome_clarify[lang]);
+};
+
+// ── composeAskNeighbourhood ──
+// City + type are known; neighbourhood isn't. Asked BEFORE searching (see
+// nextBestAction.js's qualifying-question gate) rather than showing results
+// on partial criteria and hoping a follow-up gets answered. cityLabel/
+// typeLabel are deterministic facts from the profile — safe to hand the model
+// as an anchor for a natural question, same as propertyLabel elsewhere.
+const composeAskNeighbourhood = async ({ lang, userMessage, cityLabel, typeLabel, history }) => {
+    const system = `${BASE_PERSONA}
+
+Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
+
+Your task: the customer is looking for a ${typeLabel} in ${cityLabel}. Before searching, ask ONE short, natural question: which neighbourhood or area of ${cityLabel} they'd prefer. Make clear in passing that they can also say they have no particular area in mind (any area is fine) — do not present it as a rigid choice. Do NOT search or describe any properties yet — you have none to show. One or two short sentences.${historyBlock(history)}`;
+
+    const user = `The customer wrote: "${userMessage}"
+
+Write the question.`;
+
+    return callComposer(system, user, BOT_STRINGS.ask_neighbourhood[lang]);
+};
+
+// ── composeAskBudget ──
+// Neighbourhood is settled (a value, or an explicit "no preference") — ask
+// for budget next, still before searching. neighbourhoodLabel is null when
+// they opted out of a specific area, so the question can still sound natural
+// ("a villa in Lomé" rather than "a villa in null").
+const composeAskBudget = async ({ lang, userMessage, cityLabel, typeLabel, neighbourhoodLabel, history }) => {
+    const areaPhrase = neighbourhoodLabel ? `in ${neighbourhoodLabel}, ${cityLabel}` : `in ${cityLabel}`;
+    const system = `${BASE_PERSONA}
+
+Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
+
+Your task: the customer is looking for a ${typeLabel} ${areaPhrase}. Before searching, ask ONE short, natural question about their maximum budget in F CFA. Do NOT search or describe any properties yet. One or two short sentences.${historyBlock(history)}`;
+
+    const user = `The customer wrote: "${userMessage}"
+
+Write the question.`;
+
+    return callComposer(system, user, BOT_STRINGS.ask_budget[lang]);
 };
 
 // ── composeOffTopic ──
@@ -563,6 +616,8 @@ module.exports = {
     composeMidFlowAcknowledgement,
     composeNoResults,
     composeGreeting,
+    composeAskNeighbourhood,
+    composeAskBudget,
     composeOffTopic,
     composeHandoff,
     composeAskRejectionReason,

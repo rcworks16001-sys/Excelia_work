@@ -191,7 +191,7 @@ const run = async () => {
     });
 
     await scenario('Refine search after results (filters carry forward)', async (p) => {
-        await send(p, 'I want a villa in Lome');
+        await send(p, 'I want a villa in Lome, budget 500000, any area is fine');
         const r = await send(p, 'actually under 400000');
         check('re-searched instead of trapping in booking', /F CFA/.test(r.reply), r.reply);
     });
@@ -220,7 +220,7 @@ const run = async () => {
     });
 
     await scenario('French happy path', async (p) => {
-        await send(p, 'bonjour je cherche un appartement a Lome');
+        await send(p, 'bonjour je cherche un appartement a Lome, peu importe le quartier, budget 200000');
         const s = await send(p, '1');
         check('asked for a date in French', s.pendingAction === 'awaiting_viewing_datetime');
         check('stayed in French', s.lang === 'fr');
@@ -300,7 +300,7 @@ const run = async () => {
     });
 
     await scenario('Non-text message replies without destroying language or state', async (p) => {
-        await send(p, 'I am looking for a villa in Lome please');
+        await send(p, 'I am looking for a villa in Lome please, budget 400000, any area is fine');
         const r = await wh.processInboundMessage({
             phone: p, text: null, contactName: 'Smoke Test', messageType: 'image',
         });
@@ -371,6 +371,10 @@ const run = async () => {
             { pendingAction: null, intent: 'greeting' },
             { pendingAction: null, intent: 'search' },
             { pendingAction: null, intent: 'unclear' },
+            // Qualifying-question gate — only reachable with a profile that
+            // has city + type but not (yet) the next thing being asked for.
+            { pendingAction: null, intent: 'search', profile: { city: 'Lomé', property_type: 'villa' } },
+            { pendingAction: null, intent: 'search', profile: { city: 'Lomé', property_type: 'villa', neighbourhood: 'Bè' } },
         ];
         for (const c of cases) hit.add(nextBestAction(c).rule);
         const unreachable = RULES.map((r) => r.name).filter((n) => !hit.has(n));
@@ -388,12 +392,28 @@ const run = async () => {
         // reason to interrogate someone who asked a real question.
         check('unclear falls through to search',
             nextBestAction({ pendingAction: null, intent: 'unclear' }).action === ACTIONS.SEARCH_AND_SHOW);
+
+        // Qualifying gate: neighbourhood is asked before budget, both are
+        // skipped once known (or explicitly opted out), and the gate never
+        // fires at all until city AND type are both known.
+        check('city+type only -> asks neighbourhood first',
+            nextBestAction({ pendingAction: null, intent: 'search', profile: { city: 'Lomé', property_type: 'villa' } }).action === ACTIONS.ASK_NEIGHBOURHOOD);
+        check('neighbourhood known -> asks budget next, not neighbourhood again',
+            nextBestAction({ pendingAction: null, intent: 'search', profile: { city: 'Lomé', property_type: 'villa', neighbourhood: 'Bè' } }).action === ACTIONS.ASK_BUDGET);
+        check('explicit "no preference" satisfies neighbourhood, moves straight to budget',
+            nextBestAction({ pendingAction: null, intent: 'search', profile: { city: 'Lomé', property_type: 'villa', neighbourhood_no_preference: true } }).action === ACTIONS.ASK_BUDGET);
+        check('all four known (incl. no-preference) -> searches, asks nothing',
+            nextBestAction({ pendingAction: null, intent: 'search', profile: { city: 'Lomé', property_type: 'villa', neighbourhood_no_preference: true, budget_no_preference: true } }).action === ACTIONS.SEARCH_AND_SHOW);
+        check('missing type alone never triggers the gate',
+            nextBestAction({ pendingAction: null, intent: 'search', profile: { city: 'Lomé' } }).action === ACTIONS.SEARCH_AND_SHOW);
+        check('missing city alone never triggers the gate',
+            nextBestAction({ pendingAction: null, intent: 'search', profile: { property_type: 'villa' } }).action === ACTIONS.SEARCH_AND_SHOW);
     });
 
     // ── Scenarios 26-29: scoring, escalation and notifications ──
 
     await scenario('HANDOFF: price negotiation goes to a human, not to the bot', async (p) => {
-        await send(p, 'I want a villa in Lome');
+        await send(p, 'I want a villa in Lome, budget 500000, any area is fine');
         const r = await send(p, 'can you lower the price? is it negotiable?');
         const lead = await getLeadState(p);
         const prof = await getProfile(lead.id);
@@ -449,7 +469,7 @@ const run = async () => {
     await scenario('RANKING: the best match leads, not the cheapest listing', async (p) => {
         // The old ORDER BY price ASC showed a 35 000 single room first to
         // someone asking for a 4-bedroom villa, every single time.
-        const r = await send(p, 'I want to rent a 4 bedroom villa in Lome, budget 400000');
+        const r = await send(p, 'I want to rent a 4 bedroom villa in Lome, budget 400000, any area is fine');
         const first = r.reply.split('\n\n').find((b) => /^1\./.test(b.trim())) || '';
         check('top result is a villa, not the cheapest room',
             /villa/i.test(first) && !/single room|chambre/i.test(first), first.slice(0, 120));
@@ -477,7 +497,7 @@ const run = async () => {
     });
 
     await scenario('REJECTION LOOP: "I don\'t like the first one" asks why, then re-ranks', async (p) => {
-        await send(p, 'I want to rent a villa in Lome');
+        await send(p, 'I want to rent a villa in Lome, budget 500000, any area is fine');
         const asked = await send(p, "I don't like the first one");
         check('asked what was wrong rather than just accepting it',
             /price|area|size|prix|quartier|taille/i.test(asked.reply), asked.reply);
@@ -499,7 +519,13 @@ const run = async () => {
     });
 
     await scenario('COMPARE: "compare 1 and 2" sets them side by side and steers', async (p) => {
-        await send(p, 'I want to rent a villa in Lome');
+        // "No preference" (not a real value) for both, deliberately — the
+        // point of this scenario is that NO priority was stated, so the
+        // composer must ask what matters rather than invent one. A real
+        // budget/neighbourhood value would give it something genuine to
+        // reason from, which is a different (also correct) behaviour tested
+        // elsewhere, not what this scenario checks.
+        await send(p, 'I want to rent a villa in Lome, any area is fine, any budget is fine');
         const r = await send(p, 'compare 1 and 2');
         // Facts come from the DB rows, so the real figures must be present.
         check('shows a side-by-side breakdown', /F CFA/.test(r.reply) && /\(1\)/.test(r.reply) && /\(2\)/.test(r.reply),
@@ -531,7 +557,7 @@ const run = async () => {
     });
 
     await scenario('OBJECTION: "too expensive" returns cheaper options, not another question', async (p) => {
-        await send(p, 'I want to rent a villa in Lome');
+        await send(p, 'I want to rent a villa in Lome, budget 500000, any area is fine');
         const r = await send(p, 'these are all too expensive for me');
         check('came back with listings rather than interrogating them',
             /F CFA/.test(r.reply), r.reply.slice(0, 200));
@@ -542,7 +568,7 @@ const run = async () => {
     });
 
     await scenario('OBJECTION: "I\'ll think about it" backs off instead of pushing', async (p) => {
-        await send(p, 'I want to rent a villa in Lome');
+        await send(p, 'I want to rent a villa in Lome, budget 500000, any area is fine');
         const r = await send(p, 'I will think about it');
         check('did not push a viewing',
             !/book|viewing|visite|réserver/i.test(r.reply), r.reply);
@@ -551,7 +577,7 @@ const run = async () => {
     });
 
     await scenario('REJECTION on price re-searches the SAME type, never drops it', async (p) => {
-        const first = await send(p, 'I want to rent a villa in Lome, 4 bedrooms, budget 400000');
+        const first = await send(p, 'I want to rent a villa in Lome, 4 bedrooms, budget 400000, any area is fine');
         const rejectedId = first.media && first.media[0] && first.media[0].id;
         // The villa they reject is the cheapest one that fits — with only 3
         // villas in the demo catalogue, rejecting it leaves nothing cheaper
@@ -571,7 +597,7 @@ const run = async () => {
     });
 
     await scenario('REQUEST_DETAILS: "tell me more about the 2nd one" answers in text, not photos', async (p) => {
-        const first = await send(p, 'I want to rent a villa in Lome');
+        const first = await send(p, 'I want to rent a villa in Lome, budget 500000, any area is fine');
         const target = first.media && first.media[1]; // "the 2nd one"
         // "Tell me more" was previously conflated with "more pictures" purely
         // because both contain the word "more" — it re-sent photos and asked
@@ -582,6 +608,12 @@ const run = async () => {
         check('names the actual listing asked about',
             Boolean(target) && r.reply.includes(target.neighbourhood),
             `expected=${target && target.neighbourhood} reply=${r.reply.slice(0, 200)}`);
+        // Real bug: this used to re-append the FULL formatted card (numbered
+        // heading, ✓/✗ reasons, "Contact:" line) below the composed answer —
+        // the lead already saw that card once, so repeating it read as the
+        // bot glitching rather than answering. Prose only, no card, now.
+        check('does not repeat the formatted listing card',
+            !/^\d+\.\s/m.test(r.reply) && !/Contact:/.test(r.reply), r.reply);
         check('asks about arranging a viewing, not "which one"',
             /viewing|visite|visit|see it|in person/i.test(r.reply) && !/which (property|one)|quel bien|lequel/i.test(r.reply),
             r.reply.slice(0, 250));
@@ -589,7 +621,7 @@ const run = async () => {
     });
 
     await scenario('KNOWLEDGE mid-booking: a question is answered, not "I didn\'t catch that"', async (p) => {
-        await send(p, 'I want to rent a villa in Lome');
+        await send(p, 'I want to rent a villa in Lome, budget 500000, any area is fine');
         // Asked while choosing a listing, this used to hit the selection NLU,
         // classify as unclear, and get brushed off — a sensible question
         // penalised purely for its timing.
@@ -613,7 +645,7 @@ const run = async () => {
         // name from turn one (exactly what the next scenario tests) — bypass
         // it here to actually simulate WhatsApp giving no profile name.
         const say = (t) => wh.processInboundMessage({ phone: p, text: t, contactName: null, messageType: 'text' });
-        await say('I want to rent a villa in Lome');
+        await say('I want to rent a villa in Lome, budget 500000, any area is fine');
         const ask = await say('1');
         check('asked for date AND name in one message',
             /name/i.test(ask.replyText) && /date|when/i.test(ask.replyText), ask.replyText);
@@ -628,7 +660,7 @@ const run = async () => {
         const p2 = `${p}B`;
         await cleanup(p2);
         const say2 = (t) => wh.processInboundMessage({ phone: p2, text: t, contactName: null, messageType: 'text' });
-        await say2('I want to rent a villa in Lome');
+        await say2('I want to rent a villa in Lome, budget 500000, any area is fine');
         await say2('1');
         const reAsk = await say2('not sure yet'); // unparseable -> re-ask
         check('re-ask does not ask for a name again', !/name/i.test(reAsk.replyText), reAsk.replyText);
@@ -638,9 +670,53 @@ const run = async () => {
     await scenario('NAME: a WhatsApp-supplied name is trusted, never re-asked', async (p) => {
         // send() always passes contactName: 'Smoke Test' — the equivalent of
         // WhatsApp already having supplied a profile name.
-        await send(p, 'I want to rent a villa in Lome');
+        await send(p, 'I want to rent a villa in Lome, budget 500000, any area is fine');
         const ask = await send(p, '1');
         check('does not ask for a name when one is already on file', !/name/i.test(ask.reply), ask.reply);
+    });
+
+    // ── Qualifying-question gate: ask neighbourhood, then budget, before searching ──
+
+    await scenario('QUALIFYING GATE: asks neighbourhood then budget, one at a time, before searching', async (p) => {
+        // City + type only — must NOT search yet.
+        const r1 = await send(p, 'I want a villa in Lome');
+        check('asked about area/neighbourhood', /neighbourhood|area|quartier|secteur/i.test(r1.reply), r1.reply);
+        check('no listings shown', r1.media === null, `media=${JSON.stringify(r1.media)}`);
+
+        // Neighbourhood given — must ask budget next, still not search.
+        // (media === null, not a "F CFA" text check — the budget question
+        // itself is instructed to mention "F CFA" as the currency, so that
+        // substring can appear in a question with nothing searched yet.)
+        const r2 = await send(p, 'Be');
+        check('still did not search', r2.media === null, `media=${JSON.stringify(r2.media)}`);
+        check('asked about budget', /budget/i.test(r2.reply), r2.reply);
+        const prof2 = await getProfile((await getLeadState(p)).id);
+        check('neighbourhood stored', prof2.neighbourhood === 'Bè', `neighbourhood=${prof2.neighbourhood}`);
+
+        // Budget given — NOW it should search.
+        const r3 = await send(p, '400000');
+        check('searched once budget was given', /F CFA/.test(r3.reply), r3.reply.slice(0, 200));
+        check('listings shown', Array.isArray(r3.media) && r3.media.length > 0, `media=${JSON.stringify(r3.media)}`);
+    });
+
+    await scenario('QUALIFYING GATE: all four criteria in one message searches immediately', async (p) => {
+        // Nothing left to ask, so it must not interrogate them for facts
+        // already given.
+        const r = await send(p, 'I want a villa in Be, Lome, budget 400000');
+        check('searched immediately', /F CFA/.test(r.reply), r.reply.slice(0, 200));
+        check('listings shown', Array.isArray(r.media) && r.media.length > 0, `media=${JSON.stringify(r.media)}`);
+    });
+
+    await scenario('QUALIFYING GATE: explicit "no preference" for area skips straight to budget', async (p) => {
+        await send(p, 'I want an apartment in Lome');
+        const r = await send(p, 'any area is fine');
+        check('did not search yet', r.media === null, `media=${JSON.stringify(r.media)}`);
+        check('asked about budget, not area again', /budget/i.test(r.reply), r.reply);
+        const prof = await getProfile((await getLeadState(p)).id);
+        check('no_preference flag stored', prof.neighbourhood_no_preference === true, `flag=${prof.neighbourhood_no_preference}`);
+
+        const r2 = await send(p, '150000');
+        check('now searches once budget is given', /F CFA/.test(r2.reply), r2.reply.slice(0, 200));
     });
 
     console.log(`\n${'='.repeat(72)}`);

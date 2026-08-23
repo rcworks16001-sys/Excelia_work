@@ -63,7 +63,7 @@ Full detail is in "Conversational bot architecture" below — this is the index.
 | **5** | `knowledge.js` (Togo property Q&A), objection handling, escalation on repeated misunderstanding |
 | **6** | Lead profile panel + activity timeline, analytics page |
 
-**Test suite: 18 → 44 scenarios / 108 checks.** `npm run smoke-bot -- 30-34` runs a subset while
+**Test suite: 18 → 47 scenarios / 128 checks.** `npm run smoke-bot -- 30-34` runs a subset while
 iterating (~15 Claude calls); **the full run is the pre-commit gate** and prints "PARTIAL RUN" when
 filtered so a subset can never be mistaken for it.
 
@@ -91,6 +91,23 @@ conversation can't turn one click into a runaway-cost call. Uses the **dashboard
 language, not the lead's stored language — this is the one deliberate exception to "the dashboard
 toggle never touches conversation content" (see "Language handling" below), because the output here
 is for the admin's eyes only, never sent to the lead.
+
+**Also done and pushed (2026-08-23): the qualifying-question gate.** Client request: once the bot knows
+city AND property type, it must ask for neighbourhood, then budget, one at a time, BEFORE running a
+search — instead of the previous behaviour of searching on whatever partial criteria existed. Full
+detail in "Conversational bot architecture" below ("The qualifying-question gate"). Short version: two
+new `nextBestAction` rules (`ask_neighbourhood`, `ask_budget`) gate the existing search rule; two new
+sticky boolean profile columns (`neighbourhood_no_preference`, `budget_no_preference`) let a lead
+satisfy the gate with an explicit "anywhere is fine" / "any budget" instead of a value, without getting
+asked the same question forever. Stating all four in one message searches immediately — nothing is
+asked that was already given. Test suite: 44 → 47 scenarios / 108 → 127 checks.
+
+**Also done and pushed (2026-08-23): "tell me more" no longer repeats the listing card.** A second bug
+on the same `question`-decision code path found right after the one above: the answer to "tell me more
+about X" re-printed the FULL formatted card (numbered heading, price, ✓/✗ match reasons, "Contact:"
+line) below the composed sentence, even though the lead had already seen that exact card once. Full
+detail in "Conversational bot architecture" below ("`request_media` vs `question`"). Test suite: 128
+checks (same 47 scenarios, one existing scenario got a new assertion).
 
 ### Blueprint sections deliberately NOT built — don't "finish" these without asking
 - **§29 follow-up automation** — deferred by the client until after the demo. Blocked on a real Meta
@@ -308,6 +325,50 @@ decision space instantly.
 - Never extract a field nothing consumes. An unused schema field degrades extraction of the fields
   that matter (this is why emotion/objection are deferred until something branches on them).
 
+### The qualifying-question gate — client request, 2026-08-23
+Before this, the bot searched on whatever partial criteria it had, always ("SEARCH_AND_SHOW... even a
+single detail"). The client wants more discipline once the two most decisive facts are known: **once
+city AND property type are both established, the bot must ask for neighbourhood, then budget, one at a
+time, before running a search** — rather than showing results on an incomplete requirement. Stating all
+four (city, type, neighbourhood, budget) in one message searches immediately; nothing is asked that was
+already given.
+
+- **Two new rules, `ask_neighbourhood` then `ask_budget`, gate the existing `search` rule** in
+  `nextBestAction.js` — inserted directly above it, so the ordering itself encodes "ask area before
+  budget" the same way `protect_active_booking` being rule #1 encodes "nothing outranks a booking."
+  Both require `profile.city` AND `profile.property_type` to be set before they can fire at all — if
+  either is missing, the gate never engages and the existing behaviour (search anyway, near-miss
+  ranking, the composer's own "ask city before neighbourhood" habit inside `BASE_PERSONA`) is
+  unchanged. `profile` here is the **POST-merge** profile (merged before `nextBestAction` runs, same
+  as always), so a lead who states all four in one message never sees the gate fire — it's already
+  satisfied by the time the rule is evaluated.
+- **A THIRD state again, on top of the profile's usual three.** `neighbourhood`/`budget_max` being null
+  now has to mean two different things: "not asked yet" (keep asking) and "explicitly no preference"
+  (stop asking, search without that constraint). Collapsing them reintroduces the exact ratchet-vs-loop
+  class of bug the three-state merge exists to prevent — a lead who says "anywhere is fine" but keeps
+  getting asked "which neighbourhood?" every turn is a real dead end, not a hypothetical one. Two new
+  sticky boolean columns, `neighbourhood_no_preference` and `budget_no_preference` on `lead_profiles`,
+  carry that third state. The NLU reports `true` (explicitly stated — "anywhere is fine", "no budget
+  limit", "peu importe le quartier") or `null` (not mentioned — "no change", same as every other
+  field); it never reports `false`, so the ordinary merge semantics make the flag sticky once set.
+  **Only the webhookController.js call site is allowed to send a literal `false`** — computed
+  (`filters.neighbourhood ? false : filters.neighbourhood_no_preference`), to auto-clear the flag the
+  moment a real value supersedes "no preference" later in the conversation.
+- **Two new composers, `composeAskNeighbourhood` / `composeAskBudget`**, given the already-known
+  city/type/neighbourhood as deterministic facts (same "never invented, always from code" boundary as
+  every other composer) so the question sounds like a continuation ("a villa in Lomé — which
+  neighbourhood...") rather than a generic form field.
+- **This is a separate mechanism from the existing "ask city before neighbourhood" rule** in
+  `BASE_PERSONA` (`replyComposer.js`) — that one is a standing instruction the composer follows
+  *while still searching* on whatever's known, for the case where city itself isn't established yet.
+  The gate here is code-level and actually **blocks** the search; it only ever engages once city is
+  already known. The two rules don't conflict because their trigger conditions don't overlap: no city
+  → old rule (composer asks, search still runs); city + type, missing neighbourhood/budget → new gate
+  (asks, search does NOT run).
+- Smoke scenarios 45-47 test the full flow end-to-end (one-at-a-time, all-four-in-one-message, the
+  no-preference opt-out); the NBA scenario's `cases` array covers rule reachability and ordering
+  directly, with no Claude calls, since `nextBestAction` is pure.
+
 ### Property matching is scored, not filtered (`utils/propertyMatcher.js`)
 The bot no longer walks a progressive-relaxation cascade (that function is gone). It calls
 `rankPropertiesForLead`, which fetches the available catalogue and **scores** every listing.
@@ -446,6 +507,22 @@ viewing for it?" instead. The datetime-step `question` handler is unaffected —
 for the date again (`stillNeeded: 'date'`), since at that point a property is already chosen. Smoke
 scenario 40.
 
+**`composeListingAnswer` no longer re-appends the full formatted listing card.** Second real bug on the
+same code path, found right after the one above: answering "tell me more about X" re-printed the ENTIRE
+numbered card (type/price/✓✗ match reasons/"Contact:" line) below the composed sentence — the lead had
+already seen that exact card once when the listing was first shown, so seeing it again on every follow-up
+question read as the bot glitching. Originally the composer wrote only a one-line pointer ("here are the
+details below") specifically *because* the full card was always appended and the model was forbidden
+from stating any figure itself. Now the card is gone entirely and the composer writes the whole answer:
+given a deterministic `propertyLabel`/`priceLabel` (exact strings built in code, same pattern as
+`composeConfirmBooking`) it may state VERBATIM, plus the DB's own `description` text (already
+human-authored, never model-generated), it is explicitly forbidden from adding any feature or number
+beyond those two inputs — paraphrase, never invent. `listingAnswerFacts(property, lang)`
+(`webhookController.js`) is the one place that builds those three inputs, shared by both `question` call
+sites (selection step and datetime step) so the `description`/`description_en` language selection isn't
+duplicated. Smoke scenario 40 (extended) asserts the reply contains no numbered heading and no
+`Contact:` line.
+
 ### The composer never invents a fact or claims an action happened
 Two hard rules baked into `BASE_PERSONA` in `utils/replyComposer.js`:
 1. **No hallucinated property facts.** The model writes only the conversational wrapper (opening line, explanation of a widened search, follow-up question). Every price, neighbourhood, type, and the agency contact is rendered deterministically by `formatListingsBody()` and appended afterwards — the model is never given the ability to author a number.
@@ -492,6 +569,12 @@ Two hard rules baked into `BASE_PERSONA` in `utils/replyComposer.js`:
   - `appointments.requested_date` / `appointments.requested_time_of_day` — capture a resolvable date even when the exact clock time couldn't be determined ("demain matin"), without ever inventing a fake time. `requested_datetime` keeps its original strict meaning (exact datetime only).
   - `leads.notes` — free-text admin notes, separate from `conversations`, never touched by the bot.
   - `leads.pending_set_at` — timestamp the current booking pending-state was entered; drives the 24h TTL (`PENDING_STATE_TTL_HOURS` in `leadController.js`) so a lead gone quiet mid-booking isn't parked forever.
+  - `lead_profiles.neighbourhood_no_preference` / `lead_profiles.budget_no_preference` — sticky booleans
+    for the qualifying-question gate (see "Conversational bot architecture"): an EXPLICIT "no
+    preference", distinct from simply not having been asked yet. Default `false`. They DO go through
+    the normal `MERGEABLE_FIELDS` three-state merge, but the NLU itself only ever reports `true` or
+    `null` (never a bare `false`) — only the webhookController.js call site computes an explicit
+    `false`, to auto-clear the flag once a real value supersedes "no preference" later on.
 - **Three tables added by the conversational rearchitecture (see "Conversational bot architecture"), all `CREATE TABLE IF NOT EXISTS`:**
   - `lead_profiles` — 1:1 with `leads` (`ON DELETE CASCADE`), owned solely by `leadProfileController.js`. Structured requirement (transaction/type/city/neighbourhood/bedroom range/budget+stretch/purpose/timeline), interest tracking (liked/rejected property ids, rejection reasons), scoring (`lead_score`, `lead_temperature`), and handoff flags (`needs_human`, `handoff_reason`, `handoff_at`).
   - `lead_events` — behavioural history (`SEARCH_PERFORMED`, `PROPERTY_REJECTED`, `BECAME_HOT`, etc.), owned by `leadEventController.js`. `property_id` is `ON DELETE SET NULL`, not CASCADE — deleting a listing must not erase a lead's history.
@@ -511,6 +594,8 @@ The bot extracts these fields from free text using Claude (`NLUSchema` in `webho
 - `intent` (search/general_question/off_topic/greeting/closing/booking_intent/wants_human/unclear) and `handoff_reason` when `wants_human`
 - `cleared_fields` — fields the lead explicitly retracted (the third state in the profile merge — see "The lead profile is the bot's real memory")
 - `stated_name` — captured passively if a lead volunteers their own name unprompted
+- `neighbourhood_no_preference` / `budget_no_preference` — an EXPLICIT "I don't care", for the
+  qualifying-question gate (see "Conversational bot architecture" → "The qualifying-question gate")
 
 These are NOT re-extracted fresh each turn — they merge into the persistent `lead_profiles` row (see
 "The lead profile is the bot's real memory" below), which is what the search actually runs against.

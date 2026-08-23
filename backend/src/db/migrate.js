@@ -309,6 +309,18 @@ const runMigrations = async () => {
         // next deploy — only rows still holding the wrong default are touched.
         await pool.query(`UPDATE properties SET transaction = 'sale' WHERE type = 'terrain' AND transaction <> 'sale';`);
 
+        // Qualifying-question gate: once city + type are both known, the bot
+        // asks for neighbourhood then budget before searching, rather than
+        // searching immediately on partial criteria. These record an
+        // EXPLICIT "no preference" so the gate can be satisfied without a
+        // value — distinct from simply null (not yet asked). Sticky once
+        // true: the merge only ever sets this to true or leaves it
+        // unchanged (see leadProfileController.js), never resets it to
+        // false directly — stating a real neighbourhood/budget later is
+        // what clears it, computed at the call site in webhookController.js.
+        await pool.query(`ALTER TABLE lead_profiles ADD COLUMN IF NOT EXISTS neighbourhood_no_preference BOOLEAN NOT NULL DEFAULT false;`);
+        await pool.query(`ALTER TABLE lead_profiles ADD COLUMN IF NOT EXISTS budget_no_preference BOOLEAN NOT NULL DEFAULT false;`);
+
         console.log('Migrations complete.');
         process.exit(0);
     } catch (error) {

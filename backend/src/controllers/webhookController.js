@@ -36,6 +36,8 @@ const {
     composeListingAnswer,
     composeConfirmBooking,
     composeMidFlowAcknowledgement,
+    composeAskNeighbourhood,
+    composeAskBudget,
 } = require('../utils/replyComposer');
 const {
     getOrCreateLead,
@@ -322,6 +324,13 @@ const NLUSchema = z.object({
     // booking flow (composeAskDatetime), which is the primary way a name gets
     // collected. null unless they actually stated it themselves.
     stated_name: z.string().nullable(),
+
+    // ── Qualifying-question gate (nextBestAction.js) ──
+    // An EXPLICIT "I don't care" — distinct from simply not having answered
+    // yet. true ONLY when they actually say so; null otherwise (never guess
+    // this from silence — the gate's whole point is to actually ask).
+    neighbourhood_no_preference: z.boolean().nullable(),
+    budget_no_preference: z.boolean().nullable(),
 });
 
 // Builds the NLU system prompt, optionally injecting the list of known
@@ -369,6 +378,11 @@ const buildNluSystemPrompt = (knownLocations = [], profile = null) => {
             timeline: profile.timeline,
         }).filter(([, v]) => v !== null && v !== undefined)
         : [];
+    // Booleans default to false in the DB, so they can't go through the
+    // generic null-check above (false would wrongly pass it) — only surface
+    // them when actually true, i.e. when the customer already said so.
+    if (profile?.neighbourhood_no_preference) known.push(['neighbourhood_no_preference', 'true (they said any area is fine)']);
+    if (profile?.budget_no_preference) known.push(['budget_no_preference', 'true (they said any budget is fine)']);
 
     const profileBlock = known.length
         ? `WHAT YOU ALREADY KNOW ABOUT THIS CUSTOMER (established over previous messages — this is already saved, you do NOT need to repeat it):
@@ -409,8 +423,10 @@ Field guidance:
 - purpose: "self_use" (to live in), "investment" (to resell/appreciate), "rental_income" (to rent out). null unless they say so.
 - timeline: "immediate", "within_1_month", "within_3_months", "later", or "exploring" (just browsing, no timeframe). null unless they indicate one.
 - handoff_reason: only when intent is "wants_human" — "asked_for_agent", "negotiation", "complaint", or "legal_or_financial". null otherwise.
-- cleared_fields: list any field the customer has EXPLICITLY told you to drop or stop applying — "forget the budget", "anywhere is fine now", "actually never mind the area", "peu importe le quartier". This is ONLY for a deliberate retraction. Simply not mentioning a field in this message is NOT a retraction — leave it out of this list and set that field to null. Almost always an empty array.
+- cleared_fields: list any field the customer has EXPLICITLY told you to drop or stop applying — "forget the budget", "actually never mind the area". This is ONLY for a deliberate retraction. Simply not mentioning a field in this message is NOT a retraction — leave it out of this list and set that field to null. Almost always an empty array.
 - stated_name: their own name, ONLY if they give it themselves ("I'm Kofi", "my name is Ama", "c'est Koffi"). Never guess it from a WhatsApp display name or anywhere else. null in the overwhelming majority of messages — most people never mention their name unprompted.
+- neighbourhood_no_preference: true ONLY if they explicitly say they have no preference for area/neighbourhood — "anywhere is fine", "any area works", "no preference", "peu importe le quartier", "n'importe où". This is a real answer to "which neighbourhood?", not a retraction — if they say this AFTER having named a neighbourhood, also add "neighbourhood" to cleared_fields (they've moved from a specific area to no preference). null otherwise; never infer this from silence.
+- budget_no_preference: true ONLY if they explicitly say they have no budget limit — "any budget", "no limit", "budget is flexible", "peu importe le prix", "pas de limite", "budget is open". Same rule: if said after a figure was already given, also clear "budget_max". null otherwise.
 
 ${profileBlock}
 
@@ -435,6 +451,7 @@ const extractSearchFilters = async (text, history = [], profile = null) => {
         city: null, neighbourhood: null, type: null, price_max: null, bedrooms: null, transaction: null,
         budget_stretch_max: null, bedrooms_min: null, bedrooms_max: null,
         purpose: null, timeline: null, handoff_reason: null, cleared_fields: [], stated_name: null,
+        neighbourhood_no_preference: null, budget_no_preference: null,
     };
     if (!text || !text.trim()) return fallback;
 
@@ -660,6 +677,18 @@ const formatListingsBody = (listings, lang) => {
     return lines.join('\n\n');
 };
 
+// ── listingAnswerFacts(property, lang) ──
+// The three deterministic inputs composeListingAnswer is allowed to work
+// from: a label and price it may state VERBATIM, and the DB's own
+// description text (never model-generated). Shared by both "question"
+// call sites (selection step and datetime step) so the language-selection
+// logic for description_en/description stays in exactly one place.
+const listingAnswerFacts = (property, lang) => ({
+    propertyLabel: `${PROPERTY_TYPE_LABELS[property.type]?.[lang] ?? property.type} — ${property.neighbourhood}, ${property.city}`,
+    priceLabel: formatXOF(property.price),
+    description: lang === 'en' ? (property.description_en || property.description) : property.description,
+});
+
 // ── formatComparison(properties, lang) ──
 // Two or three listings set attribute by attribute, so the differences are
 // readable at a glance instead of buried in three separate cards.
@@ -834,7 +863,7 @@ const handleViewingSelectionReply = async ({ leadId, text, lang, pendingListingI
         if (property) {
             return {
                 text: await composeListingAnswer({
-                    lang, userMessage: text, propertyCard: formatListingsBody([property], lang), history, stillNeeded: 'viewing_for_named',
+                    lang, userMessage: text, ...listingAnswerFacts(property, lang), history, stillNeeded: 'viewing_for_named',
                 }),
                 mediaListings: null,
             };
@@ -1172,7 +1201,7 @@ const handleViewingDateTimeReply = async ({ leadId, propertyId, text, lang, hist
     if (result.decision === 'question' && property) {
         return {
             text: await composeListingAnswer({
-                lang, userMessage: text, propertyCard: formatListingsBody([property], lang), history, stillNeeded: 'date',
+                lang, userMessage: text, ...listingAnswerFacts(property, lang), history, stillNeeded: 'date',
             }),
             mediaListings: null,
         };
@@ -1391,6 +1420,13 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                     budget_stretch_max: filters.budget_stretch_max,
                     purpose: filters.purpose,
                     timeline: filters.timeline,
+                    // A real value naming an actual area/budget supersedes an
+                    // earlier "no preference" — force the flag off (`false`,
+                    // not `null`) rather than leaving it stuck true forever.
+                    // Otherwise pass through whatever this message signalled
+                    // (`true` or `null` — never a bare `false` from the NLU).
+                    neighbourhood_no_preference: filters.neighbourhood ? false : filters.neighbourhood_no_preference,
+                    budget_no_preference: filters.price_max ? false : filters.budget_no_preference,
                 },
                 clearedFields: filters.cleared_fields || [],
             });
@@ -1463,6 +1499,27 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                 // so it never gets the welcome_prefix below.
                 replyBody = await composeGreeting({ lang, userMessage: text, isNewLead: lead.isNew, history });
                 isGreetingReply = true;
+            } else if (action === ACTIONS.ASK_NEIGHBOURHOOD) {
+                // City + type are known, neighbourhood isn't — ask before
+                // searching rather than showing results on partial criteria.
+                // cityLabel/typeLabel are DETERMINISTIC facts pulled straight
+                // from the profile, handed to the composer as an anchor so it
+                // can ask naturally ("a villa in Lomé — which area...") without
+                // inventing or restating anything itself.
+                replyBody = await composeAskNeighbourhood({
+                    lang, userMessage: text, cityLabel: profile.city,
+                    typeLabel: PROPERTY_TYPE_LABELS[profile.property_type]?.[lang] ?? profile.property_type,
+                    history,
+                });
+            } else if (action === ACTIONS.ASK_BUDGET) {
+                // Neighbourhood is settled (a value, or explicit "no
+                // preference") — ask for budget next, still before searching.
+                replyBody = await composeAskBudget({
+                    lang, userMessage: text, cityLabel: profile.city,
+                    typeLabel: PROPERTY_TYPE_LABELS[profile.property_type]?.[lang] ?? profile.property_type,
+                    neighbourhoodLabel: profile.neighbourhood || null,
+                    history,
+                });
             } else {
                 // SEARCH_AND_SHOW. Real intent, even if vague ("anything
                 // cheap?"). An empty filter set is NOT a reason to re-greet

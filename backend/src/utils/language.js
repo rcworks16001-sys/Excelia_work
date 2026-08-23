@@ -82,6 +82,16 @@ const BOT_STRINGS = {
         fr: "Je suis spécialisé dans la recherche immobilière au Togo. Dites-moi ce que vous recherchez comme logement et je vous aiderai avec plaisir.",
         en: "I'm specialized in real estate search in Togo. Tell me what kind of property you're looking for and I'll be happy to help.",
     },
+    // Qualifying-question gate (nextBestAction.js) — asked before a search
+    // runs once city + type are known but neighbourhood/budget aren't.
+    ask_neighbourhood: {
+        fr: "Avez-vous un quartier ou secteur en tête, ou n'importe quelle zone vous conviendrait ?",
+        en: "Do you have a particular neighbourhood or area in mind, or would anywhere work for you?",
+    },
+    ask_budget: {
+        fr: "Quel est votre budget maximum pour ce bien ?",
+        en: "What's your maximum budget for this property?",
+    },
     no_results: {
         fr: "Je n'ai trouvé aucun bien correspondant pour le moment. Pouvez-vous préciser la ville, le type de bien ou votre budget ?",
         en: "I couldn't find any matching properties right now. Could you tell me more about the city, property type, or your budget?",

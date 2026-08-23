@@ -40,6 +40,16 @@ const ACTIONS = {
     ASK_WHAT_THEY_WANT: 'ASK_WHAT_THEY_WANT',
     ANSWER_OFF_TOPIC: 'ANSWER_OFF_TOPIC',
     GREET: 'GREET',
+
+    // Qualifying-question gate: once city AND property type are both known,
+    // ask for the neighbourhood, then the budget, before running a search —
+    // one question at a time, never both together. Skipped entirely for
+    // anything the lead has already answered (including with an explicit
+    // "no preference"), so a lead who states all four in one message search
+    // immediately rather than being interrogated for facts already given.
+    ASK_NEIGHBOURHOOD: 'ASK_NEIGHBOURHOOD',
+    ASK_BUDGET: 'ASK_BUDGET',
+
     SEARCH_AND_SHOW: 'SEARCH_AND_SHOW',
 };
 
@@ -130,6 +140,28 @@ const RULES = [
         name: 'greeting',
         when: (ctx) => ctx.intent === 'greeting',
         action: ACTIONS.GREET,
+    },
+    {
+        name: 'ask_neighbourhood',
+        // Only once city AND type are BOTH known — asking for an area before
+        // we even know what kind of property or which city is asking before
+        // they've said enough to justify it, and the existing "ask city
+        // before neighbourhood" composer rule already covers that case by
+        // letting a sparse search run and asking city as part of its intro.
+        // `profile` here is the POST-merge profile (see webhookController.js
+        // call site), so a lead who states everything in one message never
+        // sees this rule fire — it's already satisfied by the time this runs.
+        when: (ctx) => Boolean(ctx.profile?.city) && Boolean(ctx.profile?.property_type)
+            && !ctx.profile?.neighbourhood && !ctx.profile?.neighbourhood_no_preference,
+        action: ACTIONS.ASK_NEIGHBOURHOOD,
+    },
+    {
+        name: 'ask_budget',
+        // Only reached once neighbourhood is settled (a value, or explicit
+        // "no preference") — neighbourhood is always asked first.
+        when: (ctx) => Boolean(ctx.profile?.city) && Boolean(ctx.profile?.property_type)
+            && !ctx.profile?.budget_max && !ctx.profile?.budget_no_preference,
+        action: ACTIONS.ASK_BUDGET,
     },
     {
         name: 'search',
