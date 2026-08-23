@@ -41,12 +41,15 @@ const ACTIONS = {
     ANSWER_OFF_TOPIC: 'ANSWER_OFF_TOPIC',
     GREET: 'GREET',
 
-    // Qualifying-question gate: once city AND property type are both known,
-    // ask for the neighbourhood, then the budget, before running a search —
-    // one question at a time, never both together. Skipped entirely for
-    // anything the lead has already answered (including with an explicit
-    // "no preference"), so a lead who states all four in one message search
-    // immediately rather than being interrogated for facts already given.
+    // ── Qualifying-question gate ──
+    // CITY and BUDGET are HARD requirements: the bot must never run a search
+    // without both. Everything else (including neighbourhood) is a softer
+    // extra asked in between. One question at a time, never two together, and
+    // nothing is asked that the lead has already answered — so stating it all
+    // in one message searches immediately.
+    //
+    // These are asked in list order below: city -> neighbourhood -> budget.
+    ASK_CITY: 'ASK_CITY',
     ASK_NEIGHBOURHOOD: 'ASK_NEIGHBOURHOOD',
     ASK_BUDGET: 'ASK_BUDGET',
 
@@ -142,34 +145,65 @@ const RULES = [
         action: ACTIONS.GREET,
     },
     {
+        name: 'ask_city',
+        // HARD requirement #1. Deliberately depends on NOTHING but city being
+        // absent.
+        //
+        // This rule previously did not exist, and `ask_budget` below required
+        // `city && property_type` to be BOTH already known before it would
+        // fire. That is why the gate never worked: the two reported failures
+        // ("I want a villa to rent" — no city; "not villa" — type cleared) are
+        // exactly the cases that fail that precondition, so the gate sat there
+        // permanently unreachable while the bot searched anyway. A gate must
+        // not be conditioned on the very field whose absence it exists to
+        // catch.
+        when: (ctx) => !ctx.profile?.city,
+        action: ACTIONS.ASK_CITY,
+    },
+    {
         name: 'ask_neighbourhood',
-        // Only once city AND type are BOTH known — asking for an area before
-        // we even know what kind of property or which city is asking before
-        // they've said enough to justify it, and the existing "ask city
-        // before neighbourhood" composer rule already covers that case by
-        // letting a sparse search run and asking city as part of its intro.
-        // `profile` here is the POST-merge profile (see webhookController.js
-        // call site), so a lead who states everything in one message never
-        // sees this rule fire — it's already satisfied by the time this runs.
+        // The SOFT extra, asked between the two hard ones. Still requires city
+        // and type, which is fine — it is not a gate, and `ask_city` above
+        // plus `ask_budget` below already guarantee a search cannot happen
+        // without the two fields that matter. If type is unknown this simply
+        // doesn't fire and we go straight on to budget.
         when: (ctx) => Boolean(ctx.profile?.city) && Boolean(ctx.profile?.property_type)
             && !ctx.profile?.neighbourhood && !ctx.profile?.neighbourhood_no_preference,
         action: ACTIONS.ASK_NEIGHBOURHOOD,
     },
     {
         name: 'ask_budget',
-        // Only reached once neighbourhood is settled (a value, or explicit
-        // "no preference") — neighbourhood is always asked first.
-        when: (ctx) => Boolean(ctx.profile?.city) && Boolean(ctx.profile?.property_type)
-            && !ctx.profile?.budget_max && !ctx.profile?.budget_no_preference,
+        // HARD requirement #2. Like ask_city, depends only on budget being
+        // absent — never on city or type being present.
+        //
+        // `budget_stretch_max` counts: it is a real stated ceiling and is what
+        // profileToSearchFilters turns into price_ceiling, so a lead who gave
+        // one has answered the budget question. `budget_no_preference` is the
+        // explicit "any budget" opt-out — without it, a lead who genuinely
+        // doesn't have a figure would be asked forever with no way out.
+        //
+        // NOTE: the profile column is `budget_max`. There is no
+        // `profile.price_max` — that is the FILTER name that
+        // profileToSearchFilters() maps this to. Reading `profile.price_max`
+        // here would be undefined for every lead and the bot would never
+        // search again.
+        when: (ctx) => !ctx.profile?.budget_max && !ctx.profile?.budget_stretch_max
+            && !ctx.profile?.budget_no_preference,
         action: ACTIONS.ASK_BUDGET,
     },
     {
         name: 'search',
-        // The catch-all, and deliberately so. 'unclear' lands here too: a vague
-        // message ("anything cheap?") is still a real request, and an empty
-        // filter set is not a reason to re-greet someone who just asked a
-        // genuine question. Showing something and asking one question beats
-        // interrogating them before showing anything.
+        // The catch-all — but no longer an unconditional one. By the time
+        // execution reaches here, city and budget are both known (or budget
+        // was explicitly waived), because the three rules above cannot be
+        // passed otherwise.
+        //
+        // This REVERSES the bot's original bias. It used to search on a single
+        // detail — "a vague message ('anything cheap?') is still a real
+        // request... showing something beats interrogating them". The client
+        // has explicitly overridden that: collect city and budget first, every
+        // time. `unclear` still lands here rather than re-greeting, it just
+        // now gets a qualifying question instead of listings.
         when: () => true,
         action: ACTIONS.SEARCH_AND_SHOW,
     },

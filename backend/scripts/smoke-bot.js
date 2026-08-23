@@ -134,7 +134,7 @@ const run = async () => {
 
     await scenario('Happy path: greet -> search -> select -> date -> confirm -> thanks', async (p) => {
         await send(p, 'Hello');
-        const r = await send(p, 'I am looking for a 1bhk');
+        const r = await send(p, 'I am looking for a 1bhk in Lome, any area is fine, budget 100000');
         check('search returned listings', /F CFA/.test(r.reply));
         const s = await send(p, '1');
         check('asked for a date', s.pendingAction === 'awaiting_viewing_datetime');
@@ -146,7 +146,7 @@ const run = async () => {
     });
 
     await scenario('THE REPORTED BUG: photos requested while bot awaits a date', async (p) => {
-        await send(p, 'I am looking for a 1bhk');
+        await send(p, 'I am looking for a 1bhk in Lome, any area is fine, budget 100000');
         await send(p, '1');
         const r = await send(p, 'Can you share some photos ?');
         check('sent media', Array.isArray(r.media) && r.media.length === 1, `media=${r.media && r.media.length}`);
@@ -157,7 +157,7 @@ const run = async () => {
     });
 
     await scenario('Question while bot awaits a date', async (p) => {
-        await send(p, 'I want a villa');
+        await send(p, 'I want a villa in Lome, any area is fine, budget 500000');
         await send(p, '1');
         const r = await send(p, 'what is the price again?');
         check('BOOKING SURVIVED', r.pendingAction === 'awaiting_viewing_datetime', `pending=${r.pendingAction}`);
@@ -165,27 +165,27 @@ const run = async () => {
     });
 
     await scenario('"Hello" while choosing a listing', async (p) => {
-        await send(p, 'I am looking for a 1bhk');
+        await send(p, 'I am looking for a 1bhk in Lome, any area is fine, budget 100000');
         const r = await send(p, 'Hello');
         check('flow preserved', r.pendingAction === 'awaiting_viewing_selection');
         check('did not re-welcome', !/welcome to excelia|bienvenue chez excelia/i.test(r.reply), r.reply);
     });
 
     await scenario('"thanks" while choosing a listing', async (p) => {
-        await send(p, 'I am looking for a 1bhk');
+        await send(p, 'I am looking for a 1bhk in Lome, any area is fine, budget 100000');
         const r = await send(p, 'thanks');
         check('did not re-welcome', !/welcome to excelia/i.test(r.reply), r.reply);
     });
 
     await scenario('Explicit decline DOES clear the flow', async (p) => {
-        await send(p, 'I am looking for a 1bhk');
+        await send(p, 'I am looking for a 1bhk in Lome, any area is fine, budget 100000');
         const r = await send(p, 'no thanks, not interested');
         check('flow cleared', !r.pendingAction, `pending=${r.pendingAction}`);
         check('no appointment created', (await apptCount(p)) === 0);
     });
 
     await scenario('Photos requested mid-selection without saying which', async (p) => {
-        await send(p, 'I want a villa');
+        await send(p, 'I want a villa in Lome, any area is fine, budget 500000');
         const r = await send(p, 'can you send photos?');
         check('flow preserved', r.pendingAction === 'awaiting_viewing_selection');
     });
@@ -197,7 +197,7 @@ const run = async () => {
     });
 
     await scenario('Language switch mid-booking', async (p) => {
-        await send(p, 'I am looking for a 1bhk');
+        await send(p, 'I am looking for a 1bhk in Lome, any area is fine, budget 100000');
         await send(p, '1');
         const r = await send(p, 'en francais svp');
         check('switched to French', r.lang === 'fr');
@@ -209,9 +209,18 @@ const run = async () => {
         check('redirected without listings', !/F CFA/.test(r.reply));
     });
 
-    await scenario('Vague query returns listings', async (p) => {
+    await scenario('Vague query is QUALIFIED, not answered with listings', async (p) => {
+        // INVERTED deliberately. This used to assert the opposite ("returned
+        // listings instead of re-greeting") — showing something on a single
+        // vague detail was the documented design. The client has overridden
+        // that: city and budget are collected before anything is shown.
+        // It must still not re-greet — a question gets a question, not a
+        // welcome.
         const r = await send(p, 'Do you have anything cheap?');
-        check('returned listings instead of re-greeting', /F CFA/.test(r.reply));
+        check('showed no listings', r.media === null, `media=${JSON.stringify(r.media)}`);
+        check('asked which city', /city|town|ville|Lom/i.test(r.reply), r.reply);
+        check('did not re-greet instead of asking',
+            !/welcome to excelia|bienvenue chez excelia/i.test(r.reply.replace(BOT_STRINGS.welcome_prefix.en, '')), r.reply);
     });
 
     await scenario('Impossible query degrades gracefully', async (p) => {
@@ -236,7 +245,7 @@ const run = async () => {
     });
 
     await scenario('REPORTED: liking a property must NOT auto-book it', async (p) => {
-        await send(p, 'I want a villa');
+        await send(p, 'I want a villa in Lome, any area is fine, budget 500000');
         const r = await send(p, 'Ok, 1 one I liked');
         check('did NOT jump straight to asking for a date',
             r.pendingAction !== 'awaiting_viewing_datetime', `pending=${r.pendingAction}`);
@@ -252,7 +261,7 @@ const run = async () => {
 
     await scenario('REPORTED: a returning customer saying Hi still gets greeted', async (p) => {
         await send(p, 'hello');
-        await send(p, 'I want a villa');
+        await send(p, 'I want a villa in Lome, any area is fine, budget 500000');
         await send(p, 'no thanks');
         const r = await send(p, 'Hi');
         check('greeted back rather than only asking a question',
@@ -260,14 +269,14 @@ const run = async () => {
     });
 
     await scenario('A bare number after the booking prompt still books directly', async (p) => {
-        await send(p, 'I am looking for a 1bhk');
+        await send(p, 'I am looking for a 1bhk in Lome, any area is fine, budget 100000');
         const r = await send(p, '1');
         check('treated as a real choice, asked for a date',
             r.pendingAction === 'awaiting_viewing_datetime', `pending=${r.pendingAction}`);
     });
 
     await scenario('MEMORY: never asks the same question twice', async (p) => {
-        await send(p, 'I am looking for a 1bhk');
+        await send(p, 'I am looking for a 1bhk in Lome, any area is fine, budget 100000');
         const a = await send(p, '1');                          // first date ask
         const b = await send(p, 'Can you share some photos ?'); // interruption 1
         const c = await send(p, 'where is it located');         // interruption 2
@@ -285,7 +294,7 @@ const run = async () => {
     // were completely untested until processInboundMessage was extracted.
 
     await scenario('NEW LEAD: first non-greeting message still gets the welcome prefix', async (p) => {
-        const r = await send(p, 'I want a villa');
+        const r = await send(p, 'I want a villa in Lome, any area is fine, budget 500000');
         check('welcomed on first contact', r.reply.includes(BOT_STRINGS.welcome_prefix.en), r.reply);
         check('and still answered immediately', /F CFA/.test(r.reply));
         const second = await send(p, 'what about an apartment');
@@ -338,7 +347,7 @@ const run = async () => {
     });
 
     await scenario('Stale pending booking state expires instead of trapping the lead', async (p) => {
-        await send(p, 'I want a villa');
+        await send(p, 'I want a villa in Lome, any area is fine, budget 500000');
         const mid = await getLeadState(p);
         check('is awaiting a selection', mid.pendingAction === 'awaiting_viewing_selection');
 
@@ -369,10 +378,11 @@ const run = async () => {
             { pendingAction: null, intent: 'booking_intent' },
             { pendingAction: null, intent: 'off_topic' },
             { pendingAction: null, intent: 'greeting' },
-            { pendingAction: null, intent: 'search' },
-            { pendingAction: null, intent: 'unclear' },
-            // Qualifying-question gate — only reachable with a profile that
-            // has city + type but not (yet) the next thing being asked for.
+            // A fully-qualified profile is now required to reach 'search'.
+            { pendingAction: null, intent: 'search', profile: { city: 'Lomé', neighbourhood_no_preference: true, budget_max: 400000 } },
+            { pendingAction: null, intent: 'unclear', profile: { city: 'Lomé', neighbourhood_no_preference: true, budget_max: 400000 } },
+            // Qualifying-question gate, in the order it asks.
+            { pendingAction: null, intent: 'search', profile: {} },
             { pendingAction: null, intent: 'search', profile: { city: 'Lomé', property_type: 'villa' } },
             { pendingAction: null, intent: 'search', profile: { city: 'Lomé', property_type: 'villa', neighbourhood: 'Bè' } },
         ];
@@ -388,26 +398,50 @@ const run = async () => {
         }).action !== ACTIONS.DELEGATE_BOOKING_FLOW);
         check('an active booking outranks every other rule', leaks.length === 0, `leaked: ${leaks.join(', ')}`);
 
-        // 'unclear' must search, never re-greet — an empty filter set is not a
-        // reason to interrogate someone who asked a real question.
-        check('unclear falls through to search',
-            nextBestAction({ pendingAction: null, intent: 'unclear' }).action === ACTIONS.SEARCH_AND_SHOW);
+        // 'unclear' must still not re-greet — but it now gets a qualifying
+        // question rather than listings.
+        const nba = (profile, intent = 'search') => nextBestAction({ pendingAction: null, intent, profile }).action;
+        check('unclear is qualified, not re-greeted',
+            nba({}, 'unclear') === ACTIONS.ASK_CITY, nba({}, 'unclear'));
 
-        // Qualifying gate: neighbourhood is asked before budget, both are
-        // skipped once known (or explicitly opted out), and the gate never
-        // fires at all until city AND type are both known.
-        check('city+type only -> asks neighbourhood first',
-            nextBestAction({ pendingAction: null, intent: 'search', profile: { city: 'Lomé', property_type: 'villa' } }).action === ACTIONS.ASK_NEIGHBOURHOOD);
+        // ── THE HARD GATE. These two cases are the exact reported bugs, and
+        // the two assertions that stood here before asserted the OPPOSITE
+        // ("missing city alone never triggers the gate" -> SEARCH_AND_SHOW).
+        // The old gate required city AND property_type to be known before it
+        // would fire, which made it unreachable in precisely the situations it
+        // existed for. Never reintroduce a precondition on the field a gate is
+        // meant to catch.
+        check('BUG 1: type but no city -> asks CITY, never searches',
+            nba({ property_type: 'villa', transaction: 'rent' }) === ACTIONS.ASK_CITY,
+            nba({ property_type: 'villa', transaction: 'rent' }));
+        check('BUG 2: city but no type and no budget -> asks BUDGET, never searches',
+            nba({ city: 'Lomé', neighbourhood_no_preference: true }) === ACTIONS.ASK_BUDGET,
+            nba({ city: 'Lomé', neighbourhood_no_preference: true }));
+        check('nothing known at all -> asks CITY', nba({}) === ACTIONS.ASK_CITY, nba({}));
+        check('city known, budget missing -> asks (never searches)',
+            nba({ city: 'Lomé' }) !== ACTIONS.SEARCH_AND_SHOW, nba({ city: 'Lomé' }));
+
+        // Ask order: city -> neighbourhood -> budget.
+        check('city+type, no neighbourhood -> asks neighbourhood',
+            nba({ city: 'Lomé', property_type: 'villa' }) === ACTIONS.ASK_NEIGHBOURHOOD);
         check('neighbourhood known -> asks budget next, not neighbourhood again',
-            nextBestAction({ pendingAction: null, intent: 'search', profile: { city: 'Lomé', property_type: 'villa', neighbourhood: 'Bè' } }).action === ACTIONS.ASK_BUDGET);
-        check('explicit "no preference" satisfies neighbourhood, moves straight to budget',
-            nextBestAction({ pendingAction: null, intent: 'search', profile: { city: 'Lomé', property_type: 'villa', neighbourhood_no_preference: true } }).action === ACTIONS.ASK_BUDGET);
-        check('all four known (incl. no-preference) -> searches, asks nothing',
-            nextBestAction({ pendingAction: null, intent: 'search', profile: { city: 'Lomé', property_type: 'villa', neighbourhood_no_preference: true, budget_no_preference: true } }).action === ACTIONS.SEARCH_AND_SHOW);
-        check('missing type alone never triggers the gate',
-            nextBestAction({ pendingAction: null, intent: 'search', profile: { city: 'Lomé' } }).action === ACTIONS.SEARCH_AND_SHOW);
-        check('missing city alone never triggers the gate',
-            nextBestAction({ pendingAction: null, intent: 'search', profile: { property_type: 'villa' } }).action === ACTIONS.SEARCH_AND_SHOW);
+            nba({ city: 'Lomé', property_type: 'villa', neighbourhood: 'Bè' }) === ACTIONS.ASK_BUDGET);
+        check('explicit "no preference" satisfies neighbourhood, moves to budget',
+            nba({ city: 'Lomé', property_type: 'villa', neighbourhood_no_preference: true }) === ACTIONS.ASK_BUDGET);
+
+        // Everything answered -> search, asking nothing twice.
+        check('all known -> searches',
+            nba({ city: 'Lomé', property_type: 'villa', neighbourhood: 'Bè', budget_max: 400000 }) === ACTIONS.SEARCH_AND_SHOW);
+        check('explicit no-preference on both -> searches',
+            nba({ city: 'Lomé', property_type: 'villa', neighbourhood_no_preference: true, budget_no_preference: true }) === ACTIONS.SEARCH_AND_SHOW);
+        check('a stated stretch ceiling counts as a budget',
+            nba({ city: 'Lomé', neighbourhood_no_preference: true, budget_stretch_max: 90000 }) === ACTIONS.SEARCH_AND_SHOW);
+
+        // The naming trap: the profile column is budget_max. If the gate were
+        // written against profile.price_max it would be undefined for every
+        // lead and the bot would never search again.
+        check('gate reads budget_max, not the non-existent price_max',
+            nba({ city: 'Lomé', neighbourhood_no_preference: true, price_max: 400000 }) === ACTIONS.ASK_BUDGET);
     });
 
     // ── Scenarios 26-29: scoring, escalation and notifications ──
@@ -440,7 +474,7 @@ const run = async () => {
     });
 
     await scenario('SCORING: engagement raises the score and advances the pipeline', async (p) => {
-        await send(p, 'I want to rent a villa in Lome, budget 400000, I need it this month');
+        await send(p, 'I want to rent a villa in Lome, any area is fine, budget 400000, I need it this month');
         const lead = await getLeadState(p);
         const prof = await getProfile(lead.id);
         check('score computed', prof.lead_score > 0, `score=${prof.lead_score}`);
@@ -451,7 +485,7 @@ const run = async () => {
     });
 
     await scenario('SCORING: the bot never overrides a human\'s "lost" verdict', async (p) => {
-        await send(p, 'I want a villa in Lome with 4 bedrooms, budget 400000, moving this month');
+        await send(p, 'I want a villa in Lome with 4 bedrooms, any area is fine, budget 400000, moving this month');
         const lead = await getLeadState(p);
 
         // An admin decides this lead is dead.
@@ -487,13 +521,21 @@ const run = async () => {
             !/✓\s*(Villa|Apartment|Land|Mini-villa)/.test(r.reply), r.reply.slice(0, 300));
     });
 
-    await scenario('REASONS: nothing is claimed when nothing was asked for', async (p) => {
-        // "anything cheap" states no budget, area, type or size — so the cards
-        // must carry NO ✓/✗ lines at all. Printing "✓ Within your budget" at
-        // someone who never gave one is the exact failure BASE_PERSONA bans.
-        const r = await send(p, 'do you have anything cheap?');
-        check('returned listings', /F CFA/.test(r.reply));
-        check('no fabricated match claims', !/✓|✗/.test(r.reply), r.reply.slice(0, 250));
+    await scenario('REASONS: nothing is claimed for a criterion never stated', async (p) => {
+        // The safety property is unchanged — the bot must never print a ✓/✗ for
+        // something the customer did not ask for. Only the SETUP had to change:
+        // city and budget are now mandatory before any search, so "✓ Lomé" and
+        // "✓ Within your budget" are legitimately expected here. What must NOT
+        // appear is a claim about property TYPE or BEDROOMS, neither of which
+        // was stated. (The old version asserted zero ✓/✗ of any kind, which is
+        // unreachable now that a search requires two stated criteria.)
+        const r = await send(p, 'do you have anything cheap in Lome, budget 100000');
+        check('returned listings', Array.isArray(r.media) && r.media.length > 0, r.reply.slice(0, 200));
+        check('no fabricated TYPE claim',
+            !/[✓✗]\s*(Villa|Apartment|Single room|Land|Mini-villa|Furnished apartment)/.test(r.reply),
+            r.reply.slice(0, 300));
+        check('no fabricated BEDROOM claim',
+            !/[✓✗][^\n]*bedroom/i.test(r.reply), r.reply.slice(0, 300));
     });
 
     await scenario('REJECTION LOOP: "I don\'t like the first one" asks why, then re-ranks', async (p) => {
@@ -717,6 +759,86 @@ const run = async () => {
 
         const r2 = await send(p, '150000');
         check('now searches once budget is given', /F CFA/.test(r2.reply), r2.reply.slice(0, 200));
+    });
+
+    // ── The two reported bugs, end to end through the real router ──
+
+    await scenario('HARD GATE bug 1: "I want a villa to rent" must ask CITY, not search', async (p) => {
+        // Reported: this searched and dumped 3 villas + photos immediately,
+        // with neither a city nor a budget known. The old gate could not fire
+        // because it required city to already be set.
+        const r = await send(p, 'I want a villa to rent');
+        check('sent NO listings', r.media === null, `media=${JSON.stringify(r.media)}`);
+        check('printed no listing card', !/^\d+\.\s.+F CFA/m.test(r.reply), r.reply.slice(0, 200));
+        check('asked which city', /city|town|ville|Lom/i.test(r.reply), r.reply);
+    });
+
+    await scenario('HARD GATE bug 2: "Not villa" with no budget must ask, not re-search', async (p) => {
+        // Reported: changing their mind on type triggered an immediate search
+        // for other types while budget was still unknown.
+        const setup = await send(p, 'I want a villa in Lome');
+        check('setup showed nothing (budget still unknown)', setup.media === null, `media=${JSON.stringify(setup.media)}`);
+
+        const r = await send(p, 'Not villa');
+        check('sent NO listings', r.media === null, `media=${JSON.stringify(r.media)}`);
+        check('printed no listing card', !/^\d+\.\s.+F CFA/m.test(r.reply), r.reply.slice(0, 250));
+
+        // And once budget finally arrives, it may search normally again.
+        const after = await send(p, 'my budget is 150000');
+        check('searches once budget is known', Array.isArray(after.media) && after.media.length > 0,
+            `media=${JSON.stringify(after.media)}`);
+    });
+
+    await scenario('NLU SCHEMA: the extraction call actually parses (union-parameter limit)', async () => {
+        // Guards a near-miss that broke EVERY extraction at once. The
+        // Anthropic structured-output API rejects a schema with more than 16
+        // union-typed parameters, and every `.nullable()` field is a union.
+        // NLUSchema sits at exactly 16; adding one more nullable field made
+        // the API return 400 and extractSearchFilters fall back to intent
+        // 'unclear' with all filters null — the bot silently understood
+        // nothing, while still replying fluently. Only stderr showed it.
+        //
+        // A rich message must therefore come back POPULATED, not as the
+        // all-null fallback. If this fails after adding an NLU field, use a
+        // sentinel enum value instead of .nullable().
+        const f = await wh.extractSearchFilters('I want to rent a villa in Lome with 3 bedrooms, budget 400000', [], null);
+        check('schema was accepted (fields populated, not the null fallback)',
+            f.city !== null && f.type !== null && f.price_max !== null,
+            `city=${f.city} type=${f.type} price_max=${f.price_max} intent=${f.intent}`);
+    });
+
+    await scenario('EXCLUDED TYPE: "not villa" removes villas AND the intro tells the truth', async (p) => {
+        // Reported: the intro announced "here are properties that aren't
+        // villas" and then listed a villa as #1. Two faults in one — "not
+        // villa" only NULLed property_type (so the search was unconstrained
+        // and villas ranked normally), and the composer invented an exclusion
+        // claim from the transcript that nothing in the code had performed.
+        const first = await send(p, 'I want a villa in Be, Lome, budget 400000');
+        check('setup showed villas', (first.media || []).some((m) => m.type === 'villa'),
+            `types=${(first.media || []).map((m) => m.type).join(',')}`);
+
+        const r = await send(p, 'Not villa');
+        check('re-searched rather than getting stuck',
+            Array.isArray(r.media) && r.media.length > 0, r.reply.slice(0, 200));
+        check('NO villa in the results',
+            (r.media || []).every((m) => m.type !== 'villa'),
+            `types=${(r.media || []).map((m) => m.type).join(',')}`);
+        // The card body is rendered from the DB, so a villa card appearing
+        // would contradict any "no villas" intro regardless of wording.
+        check('no villa card rendered', !/^\d+\.\s*Villa/m.test(r.reply), r.reply.slice(0, 250));
+
+        const prof = await getProfile((await getLeadState(p)).id);
+        check('exclusion recorded on the profile',
+            (prof.excluded_types || []).includes('villa'), `excluded_types=${JSON.stringify(prof.excluded_types)}`);
+
+        // Changing their mind must un-exclude it — continuing to filter out
+        // something they have just asked for is the same failure in reverse.
+        const back = await send(p, 'actually show me a villa after all');
+        const prof2 = await getProfile((await getLeadState(p)).id);
+        check('asking for the type again un-excludes it',
+            !(prof2.excluded_types || []).includes('villa'), `excluded_types=${JSON.stringify(prof2.excluded_types)}`);
+        check('villas are shown again', (back.media || []).some((m) => m.type === 'villa'),
+            `types=${(back.media || []).map((m) => m.type).join(',')}`);
     });
 
     console.log(`\n${'='.repeat(72)}`);

@@ -209,8 +209,24 @@ const rankProperties = (properties, filters = {}, { limit = 3, lang = 'fr', reje
     const rejected = new Set(rejectedIds || []);
 
     let candidatePool = properties;
+
+    // Types the lead has explicitly ruled out ("not villa"). Removed from the
+    // pool entirely rather than scored down — this is not a preference to
+    // trade off against price, it is the one answer they have already told us
+    // is wrong, and showing it anyway reads as not listening. Same treatment,
+    // and same reasoning, as an explicitly rejected listing id below.
+    //
+    // Falls back to the full pool if excluding would leave nothing at all: a
+    // catalogue gap must not dead-end the conversation, and the ✗ match
+    // reasons still say honestly what does not fit.
+    const excludedTypes = new Set(filters.excluded_types || []);
+    if (excludedTypes.size > 0) {
+        const kept = candidatePool.filter((p) => !excludedTypes.has(p.type));
+        if (kept.length > 0) candidatePool = kept;
+    }
+
     if (lockType && filters.type) {
-        const sameType = properties.filter((p) => p.type === filters.type);
+        const sameType = candidatePool.filter((p) => p.type === filters.type);
         if (sameType.length > 0) candidatePool = sameType;
     }
 

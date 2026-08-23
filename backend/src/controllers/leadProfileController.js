@@ -46,7 +46,7 @@ const PROFILE_COLUMNS = `
     bedrooms_min, bedrooms_max, budget_max, budget_stretch_max,
     purpose, timeline, last_objection,
     neighbourhood_no_preference, budget_no_preference,
-    liked_property_ids, rejected_property_ids, rejection_reasons,
+    liked_property_ids, rejected_property_ids, rejection_reasons, excluded_types,
     last_properties_shown, conversation_summary,
     lead_score, lead_temperature, needs_human, handoff_reason, handoff_at,
     updated_at
@@ -155,6 +155,45 @@ const recordInterest = async (leadId, propertyId, { liked }, client = pool) => {
     );
 };
 
+// ── recordExcludedType(leadId, type) ──
+// A property type the lead has explicitly ruled OUT ("not villa", "pas de
+// terrain"). Appends, de-duplicated, exactly like recordInterest above.
+//
+// This is NOT the same thing as clearing property_type. Clearing says "they no
+// longer want a villa specifically"; this says "do not show them villas". The
+// merge does the first (via cleared_fields) and this does the second — without
+// it, "not villa" produced a completely unconstrained search whose top result
+// was a villa.
+//
+// Stating a type POSITIVELY later un-excludes it: someone can change their
+// mind, and if they now ask for a villa outright we must not keep filtering
+// villas out. Same reasoning as recordInterest moving an id between the liked
+// and rejected lists rather than letting it sit in both.
+const recordExcludedType = async (leadId, type, client = pool) => {
+    if (!type) return;
+    await client.query(
+        `INSERT INTO lead_profiles (lead_id, excluded_types)
+         VALUES ($1, ARRAY[$2]::text[])
+         ON CONFLICT (lead_id) DO UPDATE SET
+            excluded_types = (
+                SELECT ARRAY(SELECT DISTINCT unnest(array_append(lead_profiles.excluded_types, $2)))
+            ),
+            updated_at = now()`,
+        [leadId, type]
+    );
+};
+
+// ── clearExcludedType(leadId, type) ──
+// The inverse: they asked for this type outright, so it is no longer ruled out.
+const clearExcludedType = async (leadId, type, client = pool) => {
+    if (!type) return;
+    await client.query(
+        `UPDATE lead_profiles SET excluded_types = array_remove(excluded_types, $2), updated_at = now()
+          WHERE lead_id = $1`,
+        [leadId, type]
+    );
+};
+
 // ── recordRejectionReason(leadId, propertyId, reason) ──
 // Why a listing was turned down ("too expensive", "wrong area"). Stored per
 // property so the pattern is visible — three price rejections in a row says
@@ -210,6 +249,11 @@ const profileToSearchFilters = (profile) => {
         // push results past a number they explicitly named as their limit.
         price_ceiling: profile.budget_stretch_max || null,
         price_max: profile.budget_stretch_max ? null : profile.budget_max,
+        // Types they have explicitly ruled out. Handled by the matcher as an
+        // exclusion rather than a scored criterion — "not a villa" is not a
+        // preference to trade off against price, it is the one answer they
+        // have already told us is wrong.
+        excluded_types: profile.excluded_types || [],
     };
 };
 
@@ -307,6 +351,8 @@ module.exports = {
     refreshLeadSignals,
     recordShownListings,
     recordInterest,
+    recordExcludedType,
+    clearExcludedType,
     recordRejectionReason,
     updateSummary,
     profileToSearchFilters,

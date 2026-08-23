@@ -8,6 +8,7 @@ const pool = require('../db/index');
 const { rankPropertiesForLead, getPropertyById, getKnownLocations } = require('./propertyController');
 const {
     getProfile, mergeProfile, recordShownListings, recordInterest, recordRejectionReason,
+    recordExcludedType, clearExcludedType,
     profileToSearchFilters, flagForHuman, refreshLeadSignals,
 } = require('./leadProfileController');
 const { recordEvent, countTrailingEvents, EVENT_TYPES } = require('./leadEventController');
@@ -36,6 +37,7 @@ const {
     composeListingAnswer,
     composeConfirmBooking,
     composeMidFlowAcknowledgement,
+    composeAskCity,
     composeAskNeighbourhood,
     composeAskBudget,
 } = require('../utils/replyComposer');
@@ -331,6 +333,24 @@ const NLUSchema = z.object({
     // this from silence — the gate's whole point is to actually ask).
     neighbourhood_no_preference: z.boolean().nullable(),
     budget_no_preference: z.boolean().nullable(),
+
+    // ── Negative type preference ──
+    // A type they have explicitly ruled OUT ("not a villa", "anything but a
+    // terrain"). Distinct from `type`, which is what they DO want, and from
+    // listing it in cleared_fields, which only forgets the old value. Without
+    // this the search was left completely unconstrained and returned the very
+    // type they had just excluded.
+    //
+    // ⚠ NOT `.nullable()`, deliberately — it uses a 'none' sentinel instead.
+    // The Anthropic structured-output API rejects a schema with more than 16
+    // union-typed parameters ("exponential compilation cost"), and every
+    // `.nullable()` field is a union. This schema already sits at exactly 16;
+    // adding a 17th nullable made EVERY extraction fail with a 400 and fall
+    // back to intent 'unclear' with all filters null — i.e. the bot silently
+    // understood nothing at all. A bare z.enum() is not a union, so this adds
+    // a field without spending the budget. If you need another optional
+    // field here, use a sentinel value the same way rather than .nullable().
+    excluded_type: z.enum([...PROPERTY_TYPES, 'none']),
 });
 
 // Builds the NLU system prompt, optionally injecting the list of known
@@ -383,6 +403,9 @@ const buildNluSystemPrompt = (knownLocations = [], profile = null) => {
     // them when actually true, i.e. when the customer already said so.
     if (profile?.neighbourhood_no_preference) known.push(['neighbourhood_no_preference', 'true (they said any area is fine)']);
     if (profile?.budget_no_preference) known.push(['budget_no_preference', 'true (they said any budget is fine)']);
+    // Array field, so it can't go through the null-check above either. Shown
+    // so the model doesn't re-report an exclusion already on file every turn.
+    if (profile?.excluded_types?.length) known.push(['already ruled out', profile.excluded_types.join(', ')]);
 
     const profileBlock = known.length
         ? `WHAT YOU ALREADY KNOW ABOUT THIS CUSTOMER (established over previous messages — this is already saved, you do NOT need to repeat it):
@@ -426,6 +449,7 @@ Field guidance:
 - cleared_fields: list any field the customer has EXPLICITLY told you to drop or stop applying — "forget the budget", "actually never mind the area". This is ONLY for a deliberate retraction. Simply not mentioning a field in this message is NOT a retraction — leave it out of this list and set that field to null. Almost always an empty array.
 - stated_name: their own name, ONLY if they give it themselves ("I'm Kofi", "my name is Ama", "c'est Koffi"). Never guess it from a WhatsApp display name or anywhere else. null in the overwhelming majority of messages — most people never mention their name unprompted.
 - neighbourhood_no_preference: true ONLY if they explicitly say they have no preference for area/neighbourhood — "anywhere is fine", "any area works", "no preference", "peu importe le quartier", "n'importe où". This is a real answer to "which neighbourhood?", not a retraction — if they say this AFTER having named a neighbourhood, also add "neighbourhood" to cleared_fields (they've moved from a specific area to no preference). null otherwise; never infer this from silence.
+- excluded_type: a property type they explicitly RULED OUT, using the same enum values as "type" — "not a villa", "not villa", "anything but a villa", "I don't want a terrain", "pas de villa", "autre chose qu'une villa". This is the OPPOSITE of "type": it is what they do NOT want. If they rule out their previous choice, ALSO list "property_type" in cleared_fields (they no longer want that type) — the two work together. If they name a replacement in the same message ("not a villa, an apartment"), set type to the replacement AND excluded_type to the one they ruled out. This field is REQUIRED: use the literal string "none" when they have not ruled any type out, which is the overwhelming majority of messages. Never use "none" to mean a property type.
 - budget_no_preference: true ONLY if they explicitly say they have no budget limit — "any budget", "no limit", "budget is flexible", "peu importe le prix", "pas de limite", "budget is open". Same rule: if said after a figure was already given, also clear "budget_max". null otherwise.
 
 ${profileBlock}
@@ -451,7 +475,7 @@ const extractSearchFilters = async (text, history = [], profile = null) => {
         city: null, neighbourhood: null, type: null, price_max: null, bedrooms: null, transaction: null,
         budget_stretch_max: null, bedrooms_min: null, bedrooms_max: null,
         purpose: null, timeline: null, handoff_reason: null, cleared_fields: [], stated_name: null,
-        neighbourhood_no_preference: null, budget_no_preference: null,
+        neighbourhood_no_preference: null, budget_no_preference: null, excluded_type: 'none',
     };
     if (!text || !text.trim()) return fallback;
 
@@ -555,7 +579,7 @@ const extractViewingSelection = async (text, listingCount, history = []) => {
   * "select" — they are clearly ASKING TO BOOK a specific one, or answering the "which one?" question with a bare choice ("1", "number 2", "the second one", "book the villa"). Set selected_number.
   * "express_interest" — they say they LIKE or prefer one, without actually asking to book it ("ok, 1 I liked", "the first one looks nice", "I prefer the villa", "j'aime bien le 2"). Liking is NOT the same as booking. Set selected_number.
   * "wants_to_book" — they clearly want to book but have NOT said which property ("yes", "yes I want to book an appointment", "oui je veux visiter"). An enthusiastic yes is NOT unclear.
-  * "new_search" — they are changing or refining what they're looking for rather than picking from the list ("actually under 400000", "do you have apartments instead?", "what about Bè?", "something cheaper"). This is a NEW requirement, not a selection.
+  * "new_search" — they are changing or refining what they're looking for rather than picking from the list ("actually under 400000", "do you have apartments instead?", "what about Bè?", "something cheaper"). This is a NEW requirement, not a selection. This ALSO covers ruling out a whole property TYPE — "not villa", "not a villa", "anything but a villa", "pas de villa" — which is a change to the requirement, NOT a rejection of one listing. Use "reject_property" only when they turn down a SPECIFIC numbered listing ("I don't like the first one"); if they name a type rather than a listing, it is "new_search".
   * "request_media" — they are asking for PHOTOS or VIDEO of a specific listing ("can you share some photos of 1", "more pictures of the second one", "send me the video", "any images?"). This is specifically about visual media — never use it for a request for information/description.
   * "question" — they are ASKING for information about a listing rather than choosing, INCLUDING a general request to know more about it. This covers both a narrow fact ("what is the price of 2?", "how many bedrooms?") AND a general request for detail ("tell me more about the 2nd one", "more details on number 1", "what's the story with number 2", "en dire plus sur le premier", "où se trouve le 2 ?" [asking a location FACT, not to be sent a media file]). The word "more" here means MORE INFORMATION, not more photos — only classify as "request_media" if they explicitly name a visual thing (photo, picture, image, video). Set selected_number if they name one.
   * "objection" — they push back on ALL of them without naming one and without giving new criteria ("these are all too expensive", "it's out of my price range", "too far from everything", "I'll think about it", "je vais réfléchir"). Set objection_type: "price", "location", "size", or "thinking_about_it". If they name a specific listing use "reject_property"; if they state a new requirement use "new_search".
@@ -765,6 +789,41 @@ const formatListingsSummary = (listings, lang) =>
 // as "too expensive" was shown single rooms. See rankProperties for the
 // mechanics; this is the only caller that passes lockType: true.
 const performSearchAndRespond = async (leadId, profile, { lang, history = [], userMessage = '', lockType = false } = {}) => {
+    // ── HARD GATE: never search without city AND budget ──
+    // The decision itself belongs to nextBestAction.js (ask_city / ask_budget)
+    // and normally fires there, long before this function is entered. This is
+    // a STRUCTURAL BACKSTOP, not the main path: it sits inside the only
+    // function in the codebase that calls rankPropertiesForLead(), so no
+    // caller — present or future — can reach a search without passing it.
+    //
+    // It exists because the previous version of this gate lived only in the
+    // decision layer, with a precondition that made it unreachable in exactly
+    // the cases it was written for, and nothing anywhere caught that. Reaching
+    // this branch means the decision layer was bypassed, so it logs loudly
+    // rather than failing quietly.
+    //
+    // budget_stretch_max counts as a stated budget (it becomes price_ceiling);
+    // budget_no_preference is the explicit "any budget" opt-out. The profile
+    // column is budget_max — there is no profile.price_max.
+    const hasBudget = Boolean(profile?.budget_max || profile?.budget_stretch_max || profile?.budget_no_preference);
+    if (!profile?.city || !hasBudget) {
+        console.error(
+            `performSearchAndRespond: search blocked for lead ${leadId} — `
+            + `city=${profile?.city ?? 'MISSING'} budget=${hasBudget ? 'ok' : 'MISSING'}. `
+            + 'nextBestAction should have asked for this first.'
+        );
+        const typeLabel = profile?.property_type
+            ? (PROPERTY_TYPE_LABELS[profile.property_type]?.[lang] ?? profile.property_type)
+            : null;
+        const text = !profile?.city
+            ? await composeAskCity({ lang, userMessage, typeLabel, history })
+            : await composeAskBudget({
+                lang, userMessage, cityLabel: profile.city, typeLabel,
+                neighbourhoodLabel: profile?.neighbourhood || null, history,
+            });
+        return { text, mediaListings: null };
+    }
+
     // Filters come from the PROFILE, not the triggering message — a
     // requirement built up over several turns (or just updated by a
     // rejection handler) is searched in full.
@@ -796,8 +855,18 @@ const performSearchAndRespond = async (leadId, profile, { lang, history = [], us
     // Claude writes ONLY the intro line; the listing cards and the booking
     // prompt stay template-rendered so no price or property detail can ever
     // be model-invented.
+    // What was ACTUALLY excluded, computed from the results rather than
+    // asserted: a ruled-out type only counts as filtered if no listing of it
+    // survived. The matcher falls back to the full pool when excluding would
+    // leave nothing, so on a catalogue gap the exclusion silently doesn't
+    // apply — and the intro must not claim it did.
+    const shownTypes = new Set(listings.map((p) => p.type));
+    const excludedLabels = (searchFilters.excluded_types || [])
+        .filter((t) => !shownTypes.has(t))
+        .map((t) => PROPERTY_TYPE_LABELS[t]?.[lang] ?? t);
+
     const intro = await composeResultsIntro({
-        lang, userMessage, listings, relaxed, filters: searchFilters, history,
+        lang, userMessage, listings, relaxed, filters: searchFilters, excludedLabels, history,
     });
     const text = `${intro}\n\n${formatListingsBody(listings, lang)}\n\n${BOT_STRINGS.booking_prompt[lang]}`;
     // Remember which listings were shown (in the same numbered order) so a
@@ -1430,6 +1499,20 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                 },
                 clearedFields: filters.cleared_fields || [],
             });
+
+            // Negative type preference ("not a villa"). Appended, not merged —
+            // it accumulates, so ruling out two types in two turns rules out
+            // both. Recorded AFTER mergeProfile so both writes land before the
+            // search reads the profile back below.
+            // 'none' is the sentinel for "nothing ruled out" — see NLUSchema.
+            if (filters.excluded_type && filters.excluded_type !== 'none') {
+                await recordExcludedType(leadId, filters.excluded_type);
+            }
+            // Asking for a type outright un-excludes it: people change their
+            // minds, and continuing to filter out something they just asked
+            // for is the same not-listening failure in reverse.
+            if (filters.type) await clearExcludedType(leadId, filters.type);
+
             const profile = await getProfile(leadId);
 
             // ONE decision, made in code. See utils/nextBestAction.js — the
@@ -1499,24 +1582,38 @@ const processInboundMessage = async ({ phone, text: rawText, contactName = null,
                 // so it never gets the welcome_prefix below.
                 replyBody = await composeGreeting({ lang, userMessage: text, isNewLead: lead.isNew, history });
                 isGreetingReply = true;
+            } else if (action === ACTIONS.ASK_CITY) {
+                // HARD gate #1 — no city, so no search, no listings, no media.
+                // typeLabel is null unless a type was actually stated; the
+                // composer must not invent one to make the sentence read well.
+                replyBody = await composeAskCity({
+                    lang, userMessage: text,
+                    typeLabel: profile?.property_type
+                        ? (PROPERTY_TYPE_LABELS[profile.property_type]?.[lang] ?? profile.property_type)
+                        : null,
+                    history,
+                });
             } else if (action === ACTIONS.ASK_NEIGHBOURHOOD) {
-                // City + type are known, neighbourhood isn't — ask before
-                // searching rather than showing results on partial criteria.
-                // cityLabel/typeLabel are DETERMINISTIC facts pulled straight
-                // from the profile, handed to the composer as an anchor so it
-                // can ask naturally ("a villa in Lomé — which area...") without
-                // inventing or restating anything itself.
+                // The soft extra between the two hard gates. City + type are
+                // both known here. cityLabel/typeLabel are DETERMINISTIC facts
+                // pulled straight from the profile, handed to the composer as
+                // an anchor so it can ask naturally ("a villa in Lomé — which
+                // area...") without inventing or restating anything itself.
                 replyBody = await composeAskNeighbourhood({
                     lang, userMessage: text, cityLabel: profile.city,
                     typeLabel: PROPERTY_TYPE_LABELS[profile.property_type]?.[lang] ?? profile.property_type,
                     history,
                 });
             } else if (action === ACTIONS.ASK_BUDGET) {
-                // Neighbourhood is settled (a value, or explicit "no
-                // preference") — ask for budget next, still before searching.
+                // HARD gate #2 — city is known by now (ask_city outranks
+                // this), but type may NOT be: this rule fires on a missing
+                // budget alone, so pass null rather than a stringified
+                // undefined when no type has been stated.
                 replyBody = await composeAskBudget({
                     lang, userMessage: text, cityLabel: profile.city,
-                    typeLabel: PROPERTY_TYPE_LABELS[profile.property_type]?.[lang] ?? profile.property_type,
+                    typeLabel: profile?.property_type
+                        ? (PROPERTY_TYPE_LABELS[profile.property_type]?.[lang] ?? profile.property_type)
+                        : null,
                     neighbourhoodLabel: profile.neighbourhood || null,
                     history,
                 });

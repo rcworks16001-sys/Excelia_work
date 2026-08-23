@@ -199,18 +199,33 @@ Write the reply.`;
 
 // ── composeResultsIntro ──
 // The line(s) that appear ABOVE the deterministic listing cards.
-const composeResultsIntro = async ({ lang, userMessage, listings, relaxed, filters, history }) => {
+//
+// The "what was filtered out" claim is a DETERMINISTIC fact, passed in as
+// `excludedLabels`, never inferred. A real bug: a lead said "not villa", the
+// model read that off the transcript and opened with "here are properties that
+// aren't villas" — while listing #1 was a villa, because at the time nothing in
+// the code actually excluded the type. The model was describing a filter that
+// did not exist. It is now told explicitly what was excluded (possibly
+// nothing), and forbidden from claiming any other filtering.
+const composeResultsIntro = async ({ lang, userMessage, listings, relaxed, filters, excludedLabels = [], history }) => {
     const relaxationNote = describeRelaxation(relaxed, filters);
+    const exclusionNote = excludedLabels.length
+        ? `The customer ruled out this property type, and it HAS been filtered out of the results below: ${excludedLabels.join(', ')}. You may mention that briefly if it reads naturally.`
+        : 'Nothing has been filtered out by type. Do NOT say or imply that any kind of property was excluded, left out, or filtered — it was not.';
     const system = `${BASE_PERSONA}
 
 Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
 
-Your task: write the SHORT opening line that appears directly above a numbered list of properties the customer is about to see. Do not list or describe the properties yourself — they are shown right below your line. Do not repeat their prices or locations.${historyBlock(history)}`;
+Your task: write the SHORT opening line that appears directly above a numbered list of properties the customer is about to see. Do not list or describe the properties yourself — they are shown right below your line. Do not repeat their prices or locations.
+
+NEVER describe the results as excluding, omitting or filtering out anything unless you are told below that it was actually excluded. The listings shown are exactly what they are — if you claim a type was left out and one appears in the list, you have contradicted what the customer can see directly beneath your sentence.${historyBlock(history)}`;
 
     const user = `The customer wrote: "${userMessage}"
 
 ${listings.length} matching propert${listings.length === 1 ? 'y is' : 'ies are'} about to be shown to them, in this order:
 ${summariseListings(listings, lang)}
+
+${exclusionNote}
 
 ${relaxationNote}
 
@@ -253,6 +268,25 @@ Write the greeting.`;
     return callComposer(system, user, BOT_STRINGS.welcome_clarify[lang]);
 };
 
+// ── composeAskCity ──
+// The first hard qualifying question: we will not search without a city.
+// Unlike the two below it has no deterministic facts to anchor on — city is
+// precisely what's missing — so it may only reference the property type when
+// one was actually stated (typeLabel is null otherwise, never guessed).
+const composeAskCity = async ({ lang, userMessage, typeLabel, history }) => {
+    const system = `${BASE_PERSONA}
+
+Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
+
+Your task: ask ONE short, natural question — which city or town in Togo they are looking in.${typeLabel ? ` They are looking for a ${typeLabel}, so acknowledge that briefly first.` : ''} Do NOT search, list, or describe any properties — you have none to show them yet, and you must not imply you do. Do NOT ask about a neighbourhood or a budget yet; the city comes first. One or two short sentences.${historyBlock(history)}`;
+
+    const user = `The customer wrote: "${userMessage}"
+
+Write the question.`;
+
+    return callComposer(system, user, BOT_STRINGS.ask_city[lang]);
+};
+
 // ── composeAskNeighbourhood ──
 // City + type are known; neighbourhood isn't. Asked BEFORE searching (see
 // nextBestAction.js's qualifying-question gate) rather than showing results
@@ -274,17 +308,21 @@ Write the question.`;
 };
 
 // ── composeAskBudget ──
-// Neighbourhood is settled (a value, or an explicit "no preference") — ask
-// for budget next, still before searching. neighbourhoodLabel is null when
-// they opted out of a specific area, so the question can still sound natural
-// ("a villa in Lomé" rather than "a villa in null").
+// The second hard qualifying question: we will not search without a budget.
+// Every label is optional-safe. neighbourhoodLabel is null when they opted
+// out of a specific area, and typeLabel is null whenever no property type is
+// known — which is now reachable, because this is a HARD gate that fires on a
+// missing budget alone (a lead who says "not villa" has their type cleared).
+// Interpolating an absent label directly would print "a undefined in Lomé".
+// cityLabel is always present: ask_city outranks this rule.
 const composeAskBudget = async ({ lang, userMessage, cityLabel, typeLabel, neighbourhoodLabel, history }) => {
     const areaPhrase = neighbourhoodLabel ? `in ${neighbourhoodLabel}, ${cityLabel}` : `in ${cityLabel}`;
+    const lookingFor = typeLabel ? `a ${typeLabel} ${areaPhrase}` : `a property ${areaPhrase}`;
     const system = `${BASE_PERSONA}
 
 Write in ${LANGUAGE_NAME[lang]}. Reply in ${LANGUAGE_NAME[lang]} ONLY.
 
-Your task: the customer is looking for a ${typeLabel} ${areaPhrase}. Before searching, ask ONE short, natural question about their maximum budget in F CFA. Do NOT search or describe any properties yet. One or two short sentences.${historyBlock(history)}`;
+Your task: the customer is looking for ${lookingFor}. Before searching, ask ONE short, natural question about their maximum budget in F CFA. Do NOT search or describe any properties yet. One or two short sentences.${historyBlock(history)}`;
 
     const user = `The customer wrote: "${userMessage}"
 
@@ -616,6 +654,7 @@ module.exports = {
     composeMidFlowAcknowledgement,
     composeNoResults,
     composeGreeting,
+    composeAskCity,
     composeAskNeighbourhood,
     composeAskBudget,
     composeOffTopic,

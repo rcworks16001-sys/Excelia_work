@@ -92,15 +92,19 @@ language, not the lead's stored language — this is the one deliberate exceptio
 toggle never touches conversation content" (see "Language handling" below), because the output here
 is for the admin's eyes only, never sent to the lead.
 
-**Also done and pushed (2026-08-23): the qualifying-question gate.** Client request: once the bot knows
-city AND property type, it must ask for neighbourhood, then budget, one at a time, BEFORE running a
-search — instead of the previous behaviour of searching on whatever partial criteria existed. Full
-detail in "Conversational bot architecture" below ("The qualifying-question gate"). Short version: two
-new `nextBestAction` rules (`ask_neighbourhood`, `ask_budget`) gate the existing search rule; two new
-sticky boolean profile columns (`neighbourhood_no_preference`, `budget_no_preference`) let a lead
-satisfy the gate with an explicit "anywhere is fine" / "any budget" instead of a value, without getting
-asked the same question forever. Stating all four in one message searches immediately — nothing is
-asked that was already given. Test suite: 44 → 47 scenarios / 108 → 127 checks.
+**Also done and pushed (2026-08-23): the qualifying-question gate — now a HARD rule.** Client request:
+the bot must **never** search without knowing **city AND budget**. Ask order is city → neighbourhood →
+budget; stating everything in one message searches immediately. Two sticky boolean profile columns
+(`neighbourhood_no_preference`, `budget_no_preference`) let a lead answer with an explicit "anywhere is
+fine" / "any budget" instead of a value, so nobody gets asked the same question forever.
+
+**This shipped broken the first time and was fixed in a follow-up — read the full section before
+touching it.** v1 gated on `city && property_type` being already known, which made it unreachable in
+exactly the two reported failures ("I want a villa to rent" — no city; "not villa" — type cleared).
+v2 makes `ask_city` depend on nothing but a missing city and `ask_budget` on nothing but a missing
+budget, and adds a structural backstop inside `performSearchAndRespond` (the only caller of
+`rankPropertiesForLead`) so no code path can route around it. Full detail in "Conversational bot
+architecture" → "The qualifying-question gate". Test suite: 44 → 49 scenarios / 108 → 139 checks.
 
 **Also done and pushed (2026-08-23): "tell me more" no longer repeats the listing card.** A second bug
 on the same `question`-decision code path found right after the one above: the answer to "tell me more
@@ -325,23 +329,44 @@ decision space instantly.
 - Never extract a field nothing consumes. An unused schema field degrades extraction of the fields
   that matter (this is why emotion/objection are deferred until something branches on them).
 
-### The qualifying-question gate — client request, 2026-08-23
-Before this, the bot searched on whatever partial criteria it had, always ("SEARCH_AND_SHOW... even a
-single detail"). The client wants more discipline once the two most decisive facts are known: **once
-city AND property type are both established, the bot must ask for neighbourhood, then budget, one at a
-time, before running a search** — rather than showing results on an incomplete requirement. Stating all
-four (city, type, neighbourhood, budget) in one message searches immediately; nothing is asked that was
-already given.
+### The qualifying-question gate — client request, HARD RULE
+**`rankPropertiesForLead()` must NEVER run unless BOTH `city` and a budget are known.** No listings, no
+photos, no location pins until then. If either is missing the bot asks for it and returns. This is a
+client instruction, not a heuristic — do not soften it back into "search on whatever we have."
 
-- **Two new rules, `ask_neighbourhood` then `ask_budget`, gate the existing `search` rule** in
-  `nextBestAction.js` — inserted directly above it, so the ordering itself encodes "ask area before
-  budget" the same way `protect_active_booking` being rule #1 encodes "nothing outranks a booking."
-  Both require `profile.city` AND `profile.property_type` to be set before they can fire at all — if
-  either is missing, the gate never engages and the existing behaviour (search anyway, near-miss
-  ranking, the composer's own "ask city before neighbourhood" habit inside `BASE_PERSONA`) is
-  unchanged. `profile` here is the **POST-merge** profile (merged before `nextBestAction` runs, same
-  as always), so a lead who states all four in one message never sees the gate fire — it's already
-  satisfied by the time the rule is evaluated.
+Ask order is **city → neighbourhood → budget**. City and budget are the two HARD gates;
+neighbourhood is a softer extra asked in between (it still requires city + type, so it can never
+block). Stating everything in one message searches immediately — nothing already answered is asked.
+
+**This REVERSES the bot's original bias**, which was "a vague message ('anything cheap?') is still a
+real request… showing something and asking one question beats interrogating them before showing
+anything." That is no longer true and the smoke suite no longer asserts it (scenario 11 was inverted;
+scenario 32 was rewritten — see below).
+
+- **Read this before touching the gate — it has failed twice for the same reason.** The first version
+  put `ask_neighbourhood`/`ask_budget` above `search` correctly, but gated BOTH on
+  `profile.city && profile.property_type` being already set. The two real-world failures were "I want a
+  villa to rent" (no city) and "not villa" (type cleared) — i.e. **exactly the cases that fail that
+  precondition**, so the gate sat permanently unreachable while the bot searched anyway. `node -c`
+  passed, the suite passed, and a smoke assertion literally encoded the bug
+  (`'missing city alone never triggers the gate' -> SEARCH_AND_SHOW`).
+  **A gate must never be conditioned on the presence of the field whose absence it exists to catch.**
+  `ask_city` now depends on nothing but `!city`, and `ask_budget` on nothing but a missing budget.
+- **The field is `profile.budget_max`. There is no `profile.price_max`.** `price_max` is the *filter*
+  name that `profileToSearchFilters()` maps `budget_max` onto. A gate written against
+  `profile.price_max` is `undefined` for every lead — the bot would ask for budget forever and never
+  search again. `budget_stretch_max` also counts as a stated budget (it becomes `price_ceiling`).
+  There is a smoke assertion pinning this exact trap.
+- **A structural backstop lives inside `performSearchAndRespond`** (`webhookController.js`), which is
+  the only function in the codebase that calls `rankPropertiesForLead`. It re-checks city+budget and
+  returns the question instead, so no caller — present or future — can reach a search without passing.
+  It is NOT the main path (the decision belongs to `nextBestAction`); reaching it means the decision
+  layer was bypassed, so it `console.error`s rather than failing silently. Keep both: the decision-layer
+  rule is what makes the question sound natural, the backstop is what makes the rule impossible to
+  route around.
+- `composeAskBudget` must tolerate a **null `typeLabel`** — `ask_budget` fires on a missing budget
+  alone, so it is reachable with no property type known (a lead who says "not villa"). Interpolating an
+  absent label directly printed "a **undefined** in Lomé".
 - **A THIRD state again, on top of the profile's usual three.** `neighbourhood`/`budget_max` being null
   now has to mean two different things: "not asked yet" (keep asking) and "explicitly no preference"
   (stop asking, search without that constraint). Collapsing them reintroduces the exact ratchet-vs-loop
@@ -354,20 +379,65 @@ already given.
   **Only the webhookController.js call site is allowed to send a literal `false`** — computed
   (`filters.neighbourhood ? false : filters.neighbourhood_no_preference`), to auto-clear the flag the
   moment a real value supersedes "no preference" later in the conversation.
-- **Two new composers, `composeAskNeighbourhood` / `composeAskBudget`**, given the already-known
-  city/type/neighbourhood as deterministic facts (same "never invented, always from code" boundary as
-  every other composer) so the question sounds like a continuation ("a villa in Lomé — which
-  neighbourhood...") rather than a generic form field.
-- **This is a separate mechanism from the existing "ask city before neighbourhood" rule** in
-  `BASE_PERSONA` (`replyComposer.js`) — that one is a standing instruction the composer follows
-  *while still searching* on whatever's known, for the case where city itself isn't established yet.
-  The gate here is code-level and actually **blocks** the search; it only ever engages once city is
-  already known. The two rules don't conflict because their trigger conditions don't overlap: no city
-  → old rule (composer asks, search still runs); city + type, missing neighbourhood/budget → new gate
-  (asks, search does NOT run).
-- Smoke scenarios 45-47 test the full flow end-to-end (one-at-a-time, all-four-in-one-message, the
-  no-preference opt-out); the NBA scenario's `cases` array covers rule reachability and ordering
-  directly, with no Claude calls, since `nextBestAction` is pure.
+- **Three composers, `composeAskCity` / `composeAskNeighbourhood` / `composeAskBudget`**, given the
+  already-known city/type/neighbourhood as deterministic facts (same "never invented, always from code"
+  boundary as every other composer) so the question sounds like a continuation ("a villa in Lomé —
+  which neighbourhood...") rather than a generic form field. All three are explicitly forbidden from
+  describing or implying any property, since by definition none have been found yet.
+- **`BASE_PERSONA`'s "ask city before neighbourhood" instruction is now belt-and-braces.** It used to
+  be the only thing covering the no-city case, and it asked *while still searching*. The code-level
+  gate now blocks that search outright, so the persona line just keeps the wording sensible.
+- Smoke coverage: the NBA scenario (pure, no Claude calls) asserts rule reachability, ask ORDER, the
+  two reported bugs by name, and the `budget_max`/`price_max` naming trap; scenarios 45-47 cover the
+  staircase end-to-end; two further scenarios reproduce the exact reported messages ("I want a villa to
+  rent", "Not villa") and assert `media === null` plus no listing card in the reply.
+- **Setup-message churn is expected when this rule changes.** ~17 smoke scenarios open with a bare
+  "I want a villa" / "I am looking for a 1bhk" and now get intercepted by the gate, so their opening
+  message must carry a city and budget for the scenario premise to survive. That is the test suite
+  correctly reflecting the product rule, not a test problem to route around.
+
+### Negative type preference — "not villa" (`excluded_types`)
+A lead saying **"not villa"** used to only NULL `property_type` via `cleared_fields`. That left the
+search completely unconstrained, so villas ranked normally and came back as the **top hit** — and the
+composer, reading "not villa" off the transcript, opened with *"here are properties that aren't
+villas"* directly above a villa card. Wrong results, plus a false claim about them, from one missing
+field.
+
+- **The system needs a place to put a NEGATIVE preference.** `lead_profiles.excluded_types TEXT[]`,
+  append-style like `liked/rejected_property_ids` (`recordExcludedType`). Clearing `property_type` says
+  "they no longer want a villa specifically"; this says "do not show them villas". Both happen — they
+  are different statements and collapsing them is what caused the bug.
+- **Excluded, not scored down** (`rankProperties`). This is not a preference to trade off against
+  price; it is the one answer they have already told us is wrong. Same treatment and same reasoning as
+  an explicitly rejected listing id — including the same last-resort fallback: if excluding would leave
+  the pool empty, the exclusion silently doesn't apply, because a catalogue gap must not dead-end the
+  conversation.
+- **Asking for the type again un-excludes it** (`clearExcludedType`, called whenever `filters.type` is
+  set). People change their minds; continuing to filter out something they have just asked for is the
+  same not-listening failure in reverse.
+- **The intro's "what was filtered out" claim is now a DETERMINISTIC input**, `excludedLabels`, and it
+  is computed from the RESULTS (a type only counts as excluded if no listing of it survived), never
+  asserted from the profile and never inferred by the model. When nothing was excluded the composer is
+  told so explicitly and forbidden from implying otherwise. This is the `BASE_PERSONA` "never state a
+  fact the code did not give you" boundary — an "excluding X" claim is exactly such a fact.
+- **Ruling out a TYPE is `new_search`, not `reject_property`** in the selection NLU. `reject_property`
+  is for a specific numbered listing. Without this the mid-selection "not villa" was classified
+  `unclear` and the exclusion never reached the general NLU at all.
+
+### ⚠ The NLU schema is at the provider's union-parameter limit — read before adding a field
+The Anthropic structured-output API rejects a schema with **more than 16 union-typed parameters**
+("exponential compilation cost"), and **every `.nullable()` field is a union**. `NLUSchema` sits at
+exactly 16.
+
+Adding a 17th nullable field returns a **400 on every single call**, and `extractSearchFilters` then
+falls back to `intent: 'unclear'` with every filter null — the bot silently understands *nothing* while
+still replying fluently. It surfaced only as a line on stderr. `node -c` cannot catch it, and it is
+invisible in the reply text.
+
+**To add an optional NLU field, use a sentinel enum value, not `.nullable()`** — `excluded_type` uses
+`z.enum([...PROPERTY_TYPES, 'none'])`, which is not a union and so costs nothing against the limit.
+There is a smoke scenario that calls `extractSearchFilters` directly and asserts the fields come back
+populated rather than as the all-null fallback; it exists purely to make this failure loud.
 
 ### Property matching is scored, not filtered (`utils/propertyMatcher.js`)
 The bot no longer walks a progressive-relaxation cascade (that function is gone). It calls
@@ -575,6 +645,9 @@ Two hard rules baked into `BASE_PERSONA` in `utils/replyComposer.js`:
     the normal `MERGEABLE_FIELDS` three-state merge, but the NLU itself only ever reports `true` or
     `null` (never a bare `false`) — only the webhookController.js call site computes an explicit
     `false`, to auto-clear the flag once a real value supersedes "no preference" later on.
+  - `lead_profiles.excluded_types` — property types the lead explicitly ruled out ("not villa").
+    Append-style array like `liked/rejected_property_ids`, NOT a mergeable scalar. See "Negative type
+    preference" in "Conversational bot architecture".
 - **Three tables added by the conversational rearchitecture (see "Conversational bot architecture"), all `CREATE TABLE IF NOT EXISTS`:**
   - `lead_profiles` — 1:1 with `leads` (`ON DELETE CASCADE`), owned solely by `leadProfileController.js`. Structured requirement (transaction/type/city/neighbourhood/bedroom range/budget+stretch/purpose/timeline), interest tracking (liked/rejected property ids, rejection reasons), scoring (`lead_score`, `lead_temperature`), and handoff flags (`needs_human`, `handoff_reason`, `handoff_at`).
   - `lead_events` — behavioural history (`SEARCH_PERFORMED`, `PROPERTY_REJECTED`, `BECAME_HOT`, etc.), owned by `leadEventController.js`. `property_id` is `ON DELETE SET NULL`, not CASCADE — deleting a listing must not erase a lead's history.
@@ -593,6 +666,9 @@ The bot extracts these fields from free text using Claude (`NLUSchema` in `webho
 - `purpose` (self_use/investment/rental_income), `timeline` (immediate/within_1_month/within_3_months/later/exploring)
 - `intent` (search/general_question/off_topic/greeting/closing/booking_intent/wants_human/unclear) and `handoff_reason` when `wants_human`
 - `cleared_fields` — fields the lead explicitly retracted (the third state in the profile merge — see "The lead profile is the bot's real memory")
+- `excluded_type` — a type they ruled OUT ("not villa"). Uses a `'none'` sentinel rather than being
+  nullable, because the schema is at the provider's 16-union limit — see the warning in "Conversational
+  bot architecture" before adding any NLU field
 - `stated_name` — captured passively if a lead volunteers their own name unprompted
 - `neighbourhood_no_preference` / `budget_no_preference` — an EXPLICIT "I don't care", for the
   qualifying-question gate (see "Conversational bot architecture" → "The qualifying-question gate")

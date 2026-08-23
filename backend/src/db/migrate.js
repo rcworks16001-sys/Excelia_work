@@ -321,6 +321,18 @@ const runMigrations = async () => {
         await pool.query(`ALTER TABLE lead_profiles ADD COLUMN IF NOT EXISTS neighbourhood_no_preference BOOLEAN NOT NULL DEFAULT false;`);
         await pool.query(`ALTER TABLE lead_profiles ADD COLUMN IF NOT EXISTS budget_no_preference BOOLEAN NOT NULL DEFAULT false;`);
 
+        // Property types the lead has explicitly ruled OUT ("not villa",
+        // "anything but a terrain"). A negative preference had no
+        // representation at all before: "not villa" merely NULLed
+        // property_type, so the next search was unconstrained and cheerfully
+        // returned a villa as the top hit — while the composer, reading the
+        // transcript, announced it was "excluding villas". Wrong results and
+        // a false claim about them, from one missing field.
+        //
+        // Append-style like liked/rejected_property_ids, so it accumulates
+        // across turns rather than being overwritten each merge.
+        await pool.query(`ALTER TABLE lead_profiles ADD COLUMN IF NOT EXISTS excluded_types TEXT[] DEFAULT '{}';`);
+
         console.log('Migrations complete.');
         process.exit(0);
     } catch (error) {
